@@ -144,3 +144,55 @@ end_of_record
         }
     }
 }
+
+Describe "untracked file handling" {
+    It "makes new files visible in git diff after intent-to-add refresh" {
+        $tempRepo = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
+        New-Item -ItemType Directory -Path $tempRepo | Out-Null
+        try {
+            $git = (Get-Command git.exe).Source
+            Invoke-ExternalText -FilePath $git -Arguments @("init", "-b", "main") -WorkingDirectory $tempRepo | Out-Null
+            "base" | Set-Content (Join-Path $tempRepo "a.txt")
+            Invoke-ExternalText -FilePath $git -Arguments @("add", "a.txt") -WorkingDirectory $tempRepo | Out-Null
+            Invoke-ExternalText -FilePath $git -Arguments @("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init") -WorkingDirectory $tempRepo | Out-Null
+            "new" | Set-Content (Join-Path $tempRepo "b.txt")
+
+            Ensure-UntrackedFilesVisible -RepoRoot $tempRepo -GitCommand $git
+            $diff = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--name-only", "HEAD") -WorkingDirectory $tempRepo).Output
+
+            $diff | Should Match "b.txt"
+        }
+        finally {
+            Remove-Item -LiteralPath $tempRepo -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "applies new-file diffs into the gate worktree" {
+        $tempRepo = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
+        New-Item -ItemType Directory -Path $tempRepo | Out-Null
+        try {
+            $git = (Get-Command git.exe).Source
+            Invoke-ExternalText -FilePath $git -Arguments @("init", "-b", "main") -WorkingDirectory $tempRepo | Out-Null
+            "base" | Set-Content (Join-Path $tempRepo "a.txt")
+            Invoke-ExternalText -FilePath $git -Arguments @("add", "a.txt") -WorkingDirectory $tempRepo | Out-Null
+            Invoke-ExternalText -FilePath $git -Arguments @("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init") -WorkingDirectory $tempRepo | Out-Null
+            "new" | Set-Content (Join-Path $tempRepo "b.txt")
+
+            Ensure-UntrackedFilesVisible -RepoRoot $tempRepo -GitCommand $git
+            $patch = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "HEAD") -WorkingDirectory $tempRepo).Output
+            $stateDir = Join-Path $tempRepo ".review-loop"
+            New-Item -ItemType Directory -Path $stateDir | Out-Null
+            $gateWorktree = New-GateWorktree -RepoRoot $tempRepo -GitCommand $git -StateDirectory $stateDir -Round 1
+            try {
+                Apply-DiffToGateWorktree -WorktreePath $gateWorktree -GitCommand $git -DiffText $patch
+                Test-Path (Join-Path $gateWorktree "b.txt") | Should Be $true
+            }
+            finally {
+                Remove-GateWorktree -WorktreePath $gateWorktree -RepoRoot $tempRepo -GitCommand $git
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $tempRepo -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

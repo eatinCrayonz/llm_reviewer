@@ -890,6 +890,22 @@ function Save-RoundSnapshot {
     return $branchName
 }
 
+function Ensure-UntrackedFilesVisible {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$GitCommand
+    )
+
+    [void](Invoke-ExternalText `
+        -FilePath $GitCommand `
+        -Arguments @("add", "-N", "--all") `
+        -WorkingDirectory $RepoRoot `
+        -AllowNonZeroExit)
+}
+
 function New-GateWorktree {
     param(
         [Parameter(Mandatory = $true)]
@@ -905,13 +921,12 @@ function New-GateWorktree {
         [int]$Round
     )
 
-    $snapshotSha = (Invoke-ExternalText `
+    $headSha = (Invoke-ExternalText `
         -FilePath $GitCommand `
-        -Arguments @("stash", "create", "review-loop gate round $Round") `
-        -WorkingDirectory $RepoRoot `
-        -AllowNonZeroExit).Output.Trim()
+        -Arguments @("rev-parse", "--verify", "HEAD") `
+        -WorkingDirectory $RepoRoot).Output.Trim()
 
-    if (-not $snapshotSha) {
+    if (-not $headSha) {
         return $null
     }
 
@@ -926,10 +941,33 @@ function New-GateWorktree {
 
     [void](Invoke-ExternalText `
         -FilePath $GitCommand `
-        -Arguments @("worktree", "add", "--detach", "--force", $worktreePath, $snapshotSha) `
+        -Arguments @("worktree", "add", "--detach", $worktreePath, $headSha) `
         -WorkingDirectory $RepoRoot)
 
     return $worktreePath
+}
+
+function Apply-DiffToGateWorktree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorktreePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$GitCommand,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DiffText
+    )
+
+    if (-not $DiffText.Trim()) {
+        return
+    }
+
+    [void](Invoke-ExternalText `
+        -FilePath $GitCommand `
+        -Arguments @("apply", "--binary") `
+        -WorkingDirectory $WorktreePath `
+        -InputText $DiffText)
 }
 
 function Remove-GateWorktree {
@@ -1064,6 +1102,8 @@ Address the reviewer findings. Do not expand scope.
     $implementerOutput = $implementerResult.Output
     Write-Utf8File -Path (Join-Path $stateDirectory ("round-{0:00}-implementer.txt" -f $round)) -Content $implementerOutput
 
+    Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
+
     $reviewDiffText = (Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "HEAD") -WorkingDirectory $repoRoot).Output
     $fullDiffText = (Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "HEAD") -WorkingDirectory $repoRoot).Output
     $diffFileNamesOutput = (Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--name-only", "HEAD") -WorkingDirectory $repoRoot).Output
@@ -1152,6 +1192,7 @@ Address the reviewer findings. Do not expand scope.
     try {
         if (@($gateDefinitions | Where-Object { $_.Command }).Count -gt 0) {
             $gateWorktreePath = New-GateWorktree -RepoRoot $repoRoot -GitCommand $gitCommand -StateDirectory $stateDirectory -Round $round
+            Apply-DiffToGateWorktree -WorktreePath $gateWorktreePath -GitCommand $gitCommand -DiffText $fullDiffText
         }
 
         foreach ($gateDefinition in $gateDefinitions) {
