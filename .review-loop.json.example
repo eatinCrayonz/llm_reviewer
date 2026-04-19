@@ -1,0 +1,11 @@
+{
+  "testCommand": "npm test -- --runInBand",
+  "lintCommand": "npm run lint",
+  "typecheckCommand": "npm run typecheck",
+  "mutationCommand": "",
+  "coverageCommand": "",
+  "coverageLcovPath": "coverage/lcov.info",
+  "verifyAddedTestsRan": true,
+  "preserveRounds": true,
+  "roundBranchPrefix": "review-loop"
+}
