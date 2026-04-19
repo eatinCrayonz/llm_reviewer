@@ -22,8 +22,8 @@ The key contract is simple:
 
 ## Files
 
-- [review-loop.ps1](C:/Users/eatin/Documents/GitHub/codex_claude_control_script/review-loop.ps1)
-- [schemas/review-result.schema.json](C:/Users/eatin/Documents/GitHub/codex_claude_control_script/schemas/review-result.schema.json)
+- [review-loop.ps1](C:/Users/eatin/Documents/GitHub/llm_reviewer/review-loop.ps1)
+- [schemas/review-result.schema.json](C:/Users/eatin/Documents/GitHub/llm_reviewer/schemas/review-result.schema.json)
 
 ## Prerequisites
 
@@ -62,7 +62,7 @@ Additional gate example:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\review-loop.ps1 "Add input validation to the parseArgs function" -TestCommand "npm test -- --runInBand" -LintCommand "npm run lint" -TypecheckCommand "npm run typecheck" -VerifyAddedTestsRan -CoverageLcovPath "coverage/lcov.info"
 ```
 
-You can also set a default in [.review-loop.json.example](C:/Users/eatin/Documents/GitHub/codex_claude_control_script/.review-loop.json.example) by copying it to `.review-loop.json`:
+You can also set a default in [.review-loop.json.example](C:/Users/eatin/Documents/GitHub/llm_reviewer/.review-loop.json.example) by copying it to `.review-loop.json`:
 
 ```json
 {
