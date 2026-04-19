@@ -955,6 +955,10 @@ function Remove-GateWorktree {
         -AllowNonZeroExit)
 }
 
+if ($env:REVIEW_LOOP_LIBRARY_MODE -eq "1") {
+    return
+}
+
 $gitCommand = Resolve-RequiredCommand -Name "git.exe"
 $claudeCommand = Resolve-RequiredCommand -Name "claude.cmd"
 $codexCommand = Resolve-RequiredCommand -Name "codex.cmd"
