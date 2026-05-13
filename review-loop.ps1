@@ -236,6 +236,25 @@ function Resolve-Setting {
     return $DefaultValue
 }
 
+function Get-ExplicitParameterValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$BoundParameters,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($BoundParameters.Contains($Name)) {
+        return $Value
+    }
+
+    return $null
+}
+
 function Resolve-ReviewSchemaPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -324,13 +343,11 @@ function New-CodexImplementerArguments {
         [Parameter(Mandatory = $true)]
         [string]$OutputPath,
 
-        [Parameter(Mandatory = $true)]
-        [string]$Prompt,
-
         [AllowNull()]
         [string]$Model
     )
 
+    $stdinPromptArgument = "-"
     $arguments = @("exec")
     if (-not [string]::IsNullOrWhiteSpace($Model)) {
         $arguments += @("--model", $Model.Trim())
@@ -340,7 +357,7 @@ function New-CodexImplementerArguments {
         "--sandbox", "workspace-write",
         "--ephemeral",
         "--output-last-message", $OutputPath,
-        $Prompt
+        $stdinPromptArgument
     )
 
     return $arguments
@@ -812,6 +829,7 @@ $tailText
 function Format-GateSummary {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$GateResults,
 
         [ValidateRange(1, 5000)]
@@ -1169,6 +1187,100 @@ function Apply-DiffToGateWorktree {
         -InputText $DiffText)
 }
 
+function Get-DiffFromBaseline {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$GitCommand,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$BaselineDiffText,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$CurrentDiffText,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Round
+    )
+
+    $headSha = (Invoke-ExternalText `
+        -FilePath $GitCommand `
+        -Arguments @("rev-parse", "--verify", "HEAD") `
+        -WorkingDirectory $RepoRoot).Output.Trim()
+
+    $worktreePath = Join-Path $StateDirectory ("baseline-compare-round-{0:00}" -f $Round)
+    if (Test-Path -LiteralPath $worktreePath) {
+        [void](Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments @("worktree", "remove", "--force", $worktreePath) `
+            -WorkingDirectory $RepoRoot `
+            -AllowNonZeroExit)
+    }
+
+    [void](Invoke-ExternalText `
+        -FilePath $GitCommand `
+        -Arguments @("worktree", "add", "--detach", $worktreePath, $headSha) `
+        -WorkingDirectory $RepoRoot)
+
+    try {
+        if ($BaselineDiffText) {
+            Apply-DiffToGateWorktree -WorktreePath $worktreePath -GitCommand $GitCommand -DiffText $BaselineDiffText
+        }
+
+        [void](Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments @("add", "--all") `
+            -WorkingDirectory $worktreePath)
+
+        [void](Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments @(
+                "-c", "user.name=Review Loop",
+                "-c", "user.email=review-loop@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m", "review-loop baseline"
+            ) `
+            -WorkingDirectory $worktreePath)
+
+        $baselineSha = (Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments @("rev-parse", "--verify", "HEAD") `
+            -WorkingDirectory $worktreePath).Output.Trim()
+
+        [void](Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments @("reset", "--hard", $headSha) `
+            -WorkingDirectory $worktreePath)
+
+        [void](Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments @("clean", "-fd") `
+            -WorkingDirectory $worktreePath `
+            -AllowNonZeroExit)
+
+        if ($CurrentDiffText) {
+            Apply-DiffToGateWorktree -WorktreePath $worktreePath -GitCommand $GitCommand -DiffText $CurrentDiffText
+        }
+
+        return [pscustomobject]@{
+            ReviewDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--no-ext-diff", $baselineSha) -WorkingDirectory $worktreePath).Output)
+            FullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--no-ext-diff", "--binary", $baselineSha) -WorkingDirectory $worktreePath).Output)
+            DiffFileNamesOutput = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--name-only", $baselineSha) -WorkingDirectory $worktreePath).Output)
+        }
+    }
+    finally {
+        Remove-GateWorktree -WorktreePath $worktreePath -RepoRoot $RepoRoot -GitCommand $GitCommand
+    }
+}
+
 function Remove-GateWorktree {
     param(
         [AllowNull()]
@@ -1225,20 +1337,28 @@ if (-not $schemaPath) {
 }
 
 $config = Read-LoopConfig -RepoRoot $repoRoot
-$explicitVerifyAddedTests = if ($PSBoundParameters.ContainsKey("VerifyAddedTestsRan")) { $VerifyAddedTestsRan.IsPresent } else { $null }
-$explicitPreserveRounds = if ($PSBoundParameters.ContainsKey("PreserveRounds")) { $PreserveRounds.IsPresent } else { $null }
-$explicitConfirmAgentCalls = if ($PSBoundParameters.ContainsKey("ConfirmAgentCalls")) { $ConfirmAgentCalls.IsPresent } else { $null }
-$explicitAllowApiKeyAuth = if ($PSBoundParameters.ContainsKey("AllowApiKeyAuth")) { $AllowApiKeyAuth.IsPresent } else { $null }
-$explicitRoundBranchPrefix = if ($PSBoundParameters.ContainsKey("RoundBranchPrefix")) { $RoundBranchPrefix } else { $null }
+$explicitTestCommand = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "TestCommand" -Value $TestCommand
+$explicitLintCommand = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "LintCommand" -Value $LintCommand
+$explicitTypecheckCommand = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "TypecheckCommand" -Value $TypecheckCommand
+$explicitMutationCommand = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "MutationCommand" -Value $MutationCommand
+$explicitCoverageCommand = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "CoverageCommand" -Value $CoverageCommand
+$explicitCoverageLcovPath = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "CoverageLcovPath" -Value $CoverageLcovPath
+$explicitImplementerModel = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "ImplementerModel" -Value $ImplementerModel
+$explicitReviewerModel = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "ReviewerModel" -Value $ReviewerModel
+$explicitVerifyAddedTests = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "VerifyAddedTestsRan" -Value $VerifyAddedTestsRan.IsPresent
+$explicitPreserveRounds = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "PreserveRounds" -Value $PreserveRounds.IsPresent
+$explicitConfirmAgentCalls = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "ConfirmAgentCalls" -Value $ConfirmAgentCalls.IsPresent
+$explicitAllowApiKeyAuth = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "AllowApiKeyAuth" -Value $AllowApiKeyAuth.IsPresent
+$explicitRoundBranchPrefix = Get-ExplicitParameterValue -BoundParameters $PSBoundParameters -Name "RoundBranchPrefix" -Value $RoundBranchPrefix
 
-$effectiveTestCommand = Resolve-Setting -ExplicitValue $TestCommand -Config $config -ConfigName "testCommand"
-$effectiveLintCommand = Resolve-Setting -ExplicitValue $LintCommand -Config $config -ConfigName "lintCommand"
-$effectiveTypecheckCommand = Resolve-Setting -ExplicitValue $TypecheckCommand -Config $config -ConfigName "typecheckCommand"
-$effectiveMutationCommand = Resolve-Setting -ExplicitValue $MutationCommand -Config $config -ConfigName "mutationCommand"
-$effectiveCoverageCommand = Resolve-Setting -ExplicitValue $CoverageCommand -Config $config -ConfigName "coverageCommand"
-$effectiveCoverageLcovPath = Resolve-Setting -ExplicitValue $CoverageLcovPath -Config $config -ConfigName "coverageLcovPath"
-$effectiveImplementerModel = Resolve-Setting -ExplicitValue $ImplementerModel -Config $config -ConfigName "implementerModel"
-$effectiveReviewerModel = Resolve-Setting -ExplicitValue $ReviewerModel -Config $config -ConfigName "reviewerModel"
+$effectiveTestCommand = Resolve-Setting -ExplicitValue $explicitTestCommand -Config $config -ConfigName "testCommand"
+$effectiveLintCommand = Resolve-Setting -ExplicitValue $explicitLintCommand -Config $config -ConfigName "lintCommand"
+$effectiveTypecheckCommand = Resolve-Setting -ExplicitValue $explicitTypecheckCommand -Config $config -ConfigName "typecheckCommand"
+$effectiveMutationCommand = Resolve-Setting -ExplicitValue $explicitMutationCommand -Config $config -ConfigName "mutationCommand"
+$effectiveCoverageCommand = Resolve-Setting -ExplicitValue $explicitCoverageCommand -Config $config -ConfigName "coverageCommand"
+$effectiveCoverageLcovPath = Resolve-Setting -ExplicitValue $explicitCoverageLcovPath -Config $config -ConfigName "coverageLcovPath"
+$effectiveImplementerModel = Resolve-Setting -ExplicitValue $explicitImplementerModel -Config $config -ConfigName "implementerModel"
+$effectiveReviewerModel = Resolve-Setting -ExplicitValue $explicitReviewerModel -Config $config -ConfigName "reviewerModel"
 $verifyAddedTests = [bool](Resolve-Setting -ExplicitValue $explicitVerifyAddedTests -Config $config -ConfigName "verifyAddedTestsRan" -DefaultValue $false)
 $preserveRoundSnapshots = [bool](Resolve-Setting -ExplicitValue $explicitPreserveRounds -Config $config -ConfigName "preserveRounds" -DefaultValue $false)
 $confirmAgentCalls = [bool](Resolve-Setting -ExplicitValue $explicitConfirmAgentCalls -Config $config -ConfigName "confirmAgentCalls" -DefaultValue $false)
@@ -1264,6 +1384,10 @@ New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
 $reviewPath = Join-Path $stateDirectory "review.json"
 $runId = Get-Date -Format "yyyyMMdd-HHmmss"
 
+Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
+$baselineFullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "HEAD") -WorkingDirectory $repoRoot).Output)
+Write-Utf8File -Path (Join-Path $stateDirectory "baseline-diff.patch") -Content $baselineFullDiffText
+
 for ($round = 1; $round -le $MaxRounds; $round++) {
     Write-Host ""
     Write-Host "=== Round $round / ${MaxRounds}: implementer (Codex) ==="
@@ -1286,7 +1410,7 @@ SUMMARY:
 - short bullet
 CLAIMED_FILES_JSON:
 ["relative/path/one","relative/path/two"]
-- Only list files that actually appear in git diff --name-only HEAD.
+- Only list files you changed for this phase.
 "@
 
     if ($round -gt 1) {
@@ -1304,7 +1428,8 @@ Address the reviewer findings. Do not expand scope.
     Confirm-AgentCall -Enabled $confirmAgentCalls -AgentName "Codex implementer" -Model $effectiveImplementerModel
     $implementerResult = Invoke-ExternalText `
         -FilePath $codexCommand `
-        -Arguments (New-CodexImplementerArguments -OutputPath $implementerPath -Prompt $implementerPrompt -Model $effectiveImplementerModel) `
+        -Arguments (New-CodexImplementerArguments -OutputPath $implementerPath -Model $effectiveImplementerModel) `
+        -InputText $implementerPrompt `
         -WorkingDirectory $repoRoot `
         -TimeoutSeconds $ImplementerTimeoutSeconds
 
@@ -1318,9 +1443,18 @@ Address the reviewer findings. Do not expand scope.
 
     Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
 
-    $reviewDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "HEAD") -WorkingDirectory $repoRoot).Output)
-    $fullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "HEAD") -WorkingDirectory $repoRoot).Output)
-    $diffFileNamesOutput = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--name-only", "HEAD") -WorkingDirectory $repoRoot).Output)
+    $gateDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "HEAD") -WorkingDirectory $repoRoot).Output)
+    $phaseDiff = Get-DiffFromBaseline `
+        -RepoRoot $repoRoot `
+        -GitCommand $gitCommand `
+        -StateDirectory $stateDirectory `
+        -BaselineDiffText $baselineFullDiffText `
+        -CurrentDiffText $gateDiffText `
+        -Round $round
+
+    $reviewDiffText = $phaseDiff.ReviewDiffText
+    $fullDiffText = $phaseDiff.FullDiffText
+    $diffFileNamesOutput = $phaseDiff.DiffFileNamesOutput
     $diffFiles = Get-DiffFiles -DiffFileNamesOutput $diffFileNamesOutput
     $addedLines = Get-AddedLinesFromDiff -DiffText $reviewDiffText
     $addedTestIdentifiers = Get-AddedTestIdentifiers -AddedLines $addedLines
@@ -1406,7 +1540,7 @@ Address the reviewer findings. Do not expand scope.
     try {
         if (@($gateDefinitions | Where-Object { $_.Command }).Count -gt 0) {
             $gateWorktreePath = New-GateWorktree -RepoRoot $repoRoot -GitCommand $gitCommand -StateDirectory $stateDirectory -Round $round
-            Apply-DiffToGateWorktree -WorktreePath $gateWorktreePath -GitCommand $gitCommand -DiffText $fullDiffText
+            Apply-DiffToGateWorktree -WorktreePath $gateWorktreePath -GitCommand $gitCommand -DiffText $gateDiffText
         }
 
         foreach ($gateDefinition in $gateDefinitions) {

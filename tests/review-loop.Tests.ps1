@@ -86,11 +86,12 @@ Describe "Resolve-ReviewSchemaPath" {
 
 Describe "agent command configuration" {
     It "adds a Codex model only when one is configured" {
-        $withoutModel = New-CodexImplementerArguments -OutputPath "out.txt" -Prompt "task" -Model $null
-        $withModel = New-CodexImplementerArguments -OutputPath "out.txt" -Prompt "task" -Model " gpt-test "
+        $withoutModel = New-CodexImplementerArguments -OutputPath "out.txt" -Model $null
+        $withModel = New-CodexImplementerArguments -OutputPath "out.txt" -Model " gpt-test "
 
         ($withoutModel -contains "--model") | Should Be $false
-        $withModel | Should Be @("exec", "--model", "gpt-test", "--sandbox", "workspace-write", "--ephemeral", "--output-last-message", "out.txt", "task")
+        $withoutModel[-1] | Should Be "-"
+        $withModel | Should Be @("exec", "--model", "gpt-test", "--sandbox", "workspace-write", "--ephemeral", "--output-last-message", "out.txt", "-")
     }
 
     It "adds a Claude reviewer model only when one is configured" {
@@ -99,6 +100,18 @@ Describe "agent command configuration" {
 
         ($withoutModel -contains "--model") | Should Be $false
         $withModel | Should Be @("-p", "--model", "claude-test", "--input-format", "text", "--output-format", "text", "--no-session-persistence")
+    }
+}
+
+Describe "Resolve-Setting" {
+    It "uses config values when an optional command-line value was not supplied" {
+        $config = [pscustomobject]@{
+            implementerModel = "codex-config-model"
+        }
+
+        $result = Resolve-Setting -ExplicitValue $null -Config $config -ConfigName "implementerModel"
+
+        $result | Should Be "codex-config-model"
     }
 }
 
@@ -125,6 +138,14 @@ Describe "Assert-NoApiKeyAuth" {
         finally {
             [Environment]::SetEnvironmentVariable("REVIEW_LOOP_TEST_API_KEY", $previousValue, "Process")
         }
+    }
+}
+
+Describe "Format-GateSummary" {
+    It "summarizes an empty additional gate list" {
+        $summary = Format-GateSummary -GateResults @() -MaxLines 20
+
+        $summary | Should Match "No additional command gates were configured"
     }
 }
 
@@ -330,6 +351,39 @@ Describe "untracked file handling" {
             finally {
                 Remove-GateWorktree -WorktreePath $gateWorktree -RepoRoot $tempRepo -GitCommand $git
             }
+        }
+        finally {
+            Remove-Item -LiteralPath $tempRepo -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe "dirty working tree baseline handling" {
+    It "returns only changes made after the baseline diff" {
+        $tempRepo = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
+        New-Item -ItemType Directory -Path $tempRepo | Out-Null
+        try {
+            $git = (Get-Command git.exe).Source
+            Invoke-ExternalText -FilePath $git -Arguments @("init", "-b", "main") -WorkingDirectory $tempRepo | Out-Null
+            "base-a" | Set-Content (Join-Path $tempRepo "a.txt")
+            "base-b" | Set-Content (Join-Path $tempRepo "b.txt")
+            Invoke-ExternalText -FilePath $git -Arguments @("add", "a.txt", "b.txt") -WorkingDirectory $tempRepo | Out-Null
+            Invoke-ExternalText -FilePath $git -Arguments @("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init") -WorkingDirectory $tempRepo | Out-Null
+
+            "dirty-before-run" | Set-Content (Join-Path $tempRepo "a.txt")
+            $baselineDiff = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "HEAD") -WorkingDirectory $tempRepo).Output
+
+            "changed-during-run" | Set-Content (Join-Path $tempRepo "b.txt")
+            $currentDiff = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "HEAD") -WorkingDirectory $tempRepo).Output
+            $stateDir = Join-Path $tempRepo ".review-loop"
+            New-Item -ItemType Directory -Path $stateDir | Out-Null
+
+            $phaseDiff = Get-DiffFromBaseline -RepoRoot $tempRepo -GitCommand $git -StateDirectory $stateDir -BaselineDiffText $baselineDiff -CurrentDiffText $currentDiff -Round 1
+            $files = @(Get-DiffFiles -DiffFileNamesOutput $phaseDiff.DiffFileNamesOutput)
+
+            $files | Should Be @("b.txt")
+            $phaseDiff.ReviewDiffText | Should Match "changed-during-run"
+            $phaseDiff.ReviewDiffText | Should Not Match "dirty-before-run"
         }
         finally {
             Remove-Item -LiteralPath $tempRepo -Recurse -Force -ErrorAction SilentlyContinue
