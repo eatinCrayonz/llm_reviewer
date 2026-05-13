@@ -115,6 +115,17 @@ Describe "Resolve-Setting" {
     }
 }
 
+Describe "Get-ExplicitParameterValue" {
+    It "returns the value only when the parameter was supplied" {
+        $boundParameters = @{
+            MaxRounds = 1
+        }
+
+        (Get-ExplicitParameterValue -BoundParameters $boundParameters -Name "MaxRounds" -Value 1) | Should Be 1
+        (Get-ExplicitParameterValue -BoundParameters $boundParameters -Name "TestCommand" -Value "") | Should Be $null
+    }
+}
+
 Describe "Assert-NoApiKeyAuth" {
     It "fails when a guarded API key environment variable is present" {
         $previousValue = [Environment]::GetEnvironmentVariable("REVIEW_LOOP_TEST_API_KEY")

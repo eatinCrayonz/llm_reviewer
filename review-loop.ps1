@@ -248,7 +248,7 @@ function Get-ExplicitParameterValue {
         [object]$Value
     )
 
-    if ($BoundParameters.Contains($Name)) {
+    if ($BoundParameters.ContainsKey($Name)) {
         return $Value
     }
 
