@@ -129,6 +129,7 @@ function Write-Utf8File {
         [string]$Path,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Content
     )
 
@@ -229,6 +230,29 @@ function Resolve-Setting {
     }
 
     return $DefaultValue
+}
+
+function Resolve-ReviewSchemaPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptRoot
+    )
+
+    $candidatePaths = @(
+        (Join-Path $RepoRoot "schemas\review-result.schema.json"),
+        (Join-Path $ScriptRoot "schemas\review-result.schema.json")
+    )
+
+    foreach ($candidatePath in $candidatePaths | Select-Object -Unique) {
+        if (Test-Path -LiteralPath $candidatePath) {
+            return [System.IO.Path]::GetFullPath($candidatePath)
+        }
+    }
+
+    return $null
 }
 
 function Invoke-CommandText {
@@ -442,9 +466,29 @@ function Is-TestFile {
     return $false
 }
 
+function Remove-GitNoiseLines {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if (-not $Text) {
+        return ""
+    }
+
+    return @(
+        $Text -split "`r?`n" |
+        Where-Object {
+            $_ -notmatch '^(warning|hint):'
+        }
+    ) -join [Environment]::NewLine
+}
+
 function Get-DiffFiles {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$DiffFileNamesOutput
     )
 
@@ -454,7 +498,7 @@ function Get-DiffFiles {
 
     return @(
         $DiffFileNamesOutput -split "`r?`n" |
-        Where-Object { $_.Trim() } |
+        Where-Object { $_.Trim() -and $_ -notmatch '^(warning|hint):' } |
         ForEach-Object { Normalize-RepoPath -Path $_ } |
         Select-Object -Unique
     )
@@ -463,8 +507,13 @@ function Get-DiffFiles {
 function Get-AddedLinesFromDiff {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$DiffText
     )
+
+    if (-not $DiffText) {
+        return @()
+    }
 
     $items = @()
     $currentFile = $null
@@ -511,11 +560,12 @@ function Get-AddedLinesFromDiff {
 function Get-AddedTestIdentifiers {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
         [object[]]$AddedLines
     )
 
     $identifiers = @()
-    foreach ($item in $AddedLines) {
+    foreach ($item in @($AddedLines)) {
         if (-not (Is-TestFile -Path $item.file)) {
             continue
         }
@@ -560,14 +610,16 @@ function Get-AddedTestIdentifiers {
 function Get-MissingTestIdentifiers {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
         [object[]]$Identifiers,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Output
     )
 
     $missing = @()
-    foreach ($identifier in $Identifiers) {
+    foreach ($identifier in @($Identifiers)) {
         $escapedName = [regex]::Escape($identifier.name)
         $pattern = "(?im)(^|[^A-Za-z0-9_])$escapedName([^A-Za-z0-9_]|$)"
         if (-not [regex]::IsMatch($Output, $pattern)) {
@@ -738,6 +790,7 @@ function Read-LcovCoverageMap {
 function Get-UncoveredAddedProductionLines {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
         [object[]]$AddedLines,
 
         [Parameter(Mandatory = $true)]
@@ -745,7 +798,7 @@ function Get-UncoveredAddedProductionLines {
     )
 
     $uncovered = @()
-    foreach ($item in $AddedLines) {
+    foreach ($item in @($AddedLines)) {
         if (Is-TestFile -Path $item.file) {
             continue
         }
@@ -956,6 +1009,7 @@ function Apply-DiffToGateWorktree {
         [string]$GitCommand,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$DiffText
     )
 
@@ -1025,9 +1079,9 @@ if (-not $hasHead) {
     throw "The repository has no commits yet. Create an initial commit before running the review loop."
 }
 
-$schemaPath = Join-Path $repoRoot "schemas\review-result.schema.json"
-if (-not (Test-Path -LiteralPath $schemaPath)) {
-    throw "Review schema file not found at $schemaPath"
+$schemaPath = Resolve-ReviewSchemaPath -RepoRoot $repoRoot -ScriptRoot $PSScriptRoot
+if (-not $schemaPath) {
+    throw "Review schema file not found in either '$repoRoot\schemas\review-result.schema.json' or '$PSScriptRoot\schemas\review-result.schema.json'."
 }
 
 $config = Read-LoopConfig -RepoRoot $repoRoot
@@ -1091,11 +1145,12 @@ Address the reviewer findings. Do not expand scope.
         -FilePath $claudeCommand `
         -Arguments @(
             "-p",
+            "--input-format", "text",
             "--output-format", "text",
             "--permission-mode", "acceptEdits",
-            "--no-session-persistence",
-            $implementerPrompt
+            "--no-session-persistence"
         ) `
+        -InputText $implementerPrompt `
         -WorkingDirectory $repoRoot `
         -TimeoutSeconds $ImplementerTimeoutSeconds
 
@@ -1104,9 +1159,9 @@ Address the reviewer findings. Do not expand scope.
 
     Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
 
-    $reviewDiffText = (Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "HEAD") -WorkingDirectory $repoRoot).Output
-    $fullDiffText = (Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "HEAD") -WorkingDirectory $repoRoot).Output
-    $diffFileNamesOutput = (Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--name-only", "HEAD") -WorkingDirectory $repoRoot).Output
+    $reviewDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "HEAD") -WorkingDirectory $repoRoot).Output)
+    $fullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "HEAD") -WorkingDirectory $repoRoot).Output)
+    $diffFileNamesOutput = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--name-only", "HEAD") -WorkingDirectory $repoRoot).Output)
     $diffFiles = Get-DiffFiles -DiffFileNamesOutput $diffFileNamesOutput
     $addedLines = Get-AddedLinesFromDiff -DiffText $reviewDiffText
     $addedTestIdentifiers = Get-AddedTestIdentifiers -AddedLines $addedLines

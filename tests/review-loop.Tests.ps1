@@ -45,6 +45,60 @@ $report = @"
     }
 }
 
+Describe "Resolve-ReviewSchemaPath" {
+    It "falls back to the script schema when the target repo has no local schema" {
+        $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
+        $repoRoot = Join-Path $tempRoot "repo"
+        $scriptRoot = Join-Path $tempRoot "script"
+        New-Item -ItemType Directory -Path $repoRoot | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $scriptRoot "schemas") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $scriptRoot "schemas\review-result.schema.json") -Value "{}" -Encoding UTF8
+
+        try {
+            $result = Resolve-ReviewSchemaPath -RepoRoot $repoRoot -ScriptRoot $scriptRoot
+
+            $result | Should Be (Join-Path $scriptRoot "schemas\review-result.schema.json")
+        }
+        finally {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "prefers a repo-local schema when one exists" {
+        $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
+        $repoRoot = Join-Path $tempRoot "repo"
+        $scriptRoot = Join-Path $tempRoot "script"
+        New-Item -ItemType Directory -Path (Join-Path $repoRoot "schemas") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $scriptRoot "schemas") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $repoRoot "schemas\review-result.schema.json") -Value "{""repo"":true}" -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $scriptRoot "schemas\review-result.schema.json") -Value "{""script"":true}" -Encoding UTF8
+
+        try {
+            $result = Resolve-ReviewSchemaPath -RepoRoot $repoRoot -ScriptRoot $scriptRoot
+
+            $result | Should Be (Join-Path $repoRoot "schemas\review-result.schema.json")
+        }
+        finally {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe "Write-Utf8File" {
+    It "writes an empty file when given an empty string" {
+        $tempFile = [System.IO.Path]::GetTempFileName()
+
+        try {
+            Write-Utf8File -Path $tempFile -Content ""
+
+            (Get-Item $tempFile).Length | Should Be 0
+        }
+        finally {
+            Remove-Item -LiteralPath $tempFile -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe "Get-AddedLinesFromDiff" {
     It "captures added lines with file and line numbers" {
         $diff = @"
@@ -67,6 +121,30 @@ index 1111111..2222222 100644
         $lines[0].line | Should Be 2
         $lines[0].text | Should Be "const b = 2;"
         $lines[1].line | Should Be 4
+    }
+
+    It "returns an empty array when the diff text is empty" {
+        $lines = @(Get-AddedLinesFromDiff -DiffText "")
+
+        $lines.Count | Should Be 0
+    }
+}
+
+Describe "Get-DiffFiles" {
+    It "returns an empty array when git diff --name-only is empty" {
+        $result = @(Get-DiffFiles -DiffFileNamesOutput "")
+
+        $result.Count | Should Be 0
+    }
+
+    It "ignores git warning lines when parsing changed files" {
+        $result = @(Get-DiffFiles -DiffFileNamesOutput @"
+warning: in the working copy of 'calc.py', LF will be replaced by CRLF the next time Git touches it
+calc.py
+test_calc.py
+"@)
+
+        $result | Should Be @("calc.py", "test_calc.py")
     }
 }
 
@@ -92,6 +170,12 @@ Describe "Get-AddedTestIdentifiers" {
         $identifiers = Get-AddedTestIdentifiers -AddedLines $items
 
         @($identifiers).Count | Should Be 0
+    }
+
+    It "returns an empty array when no added lines are present" {
+        $identifiers = @(Get-AddedTestIdentifiers -AddedLines $null)
+
+        $identifiers.Count | Should Be 0
     }
 }
 
