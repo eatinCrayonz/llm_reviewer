@@ -1107,7 +1107,7 @@ $runId = Get-Date -Format "yyyyMMdd-HHmmss"
 
 for ($round = 1; $round -le $MaxRounds; $round++) {
     Write-Host ""
-    Write-Host "=== Round $round / ${MaxRounds}: implementer (Claude) ==="
+    Write-Host "=== Round $round / ${MaxRounds}: implementer (Codex) ==="
 
     $implementerPrompt = @"
 You are the implementer in a two-agent review loop.
@@ -1141,21 +1141,26 @@ Address the reviewer findings. Do not expand scope.
 "@
     }
 
+    $implementerPath = Join-Path $stateDirectory ("round-{0:00}-implementer.txt" -f $round)
     $implementerResult = Invoke-ExternalText `
-        -FilePath $claudeCommand `
+        -FilePath $codexCommand `
         -Arguments @(
-            "-p",
-            "--input-format", "text",
-            "--output-format", "text",
-            "--permission-mode", "acceptEdits",
-            "--no-session-persistence"
+            "exec",
+            "--sandbox", "workspace-write",
+            "--ephemeral",
+            "--output-last-message", $implementerPath,
+            $implementerPrompt
         ) `
-        -InputText $implementerPrompt `
         -WorkingDirectory $repoRoot `
         -TimeoutSeconds $ImplementerTimeoutSeconds
 
-    $implementerOutput = $implementerResult.Output
-    Write-Utf8File -Path (Join-Path $stateDirectory ("round-{0:00}-implementer.txt" -f $round)) -Content $implementerOutput
+    if (Test-Path -LiteralPath $implementerPath) {
+        $implementerOutput = Get-Content -LiteralPath $implementerPath -Raw
+    }
+    else {
+        $implementerOutput = $implementerResult.Output
+        Write-Utf8File -Path $implementerPath -Content $implementerOutput
+    }
 
     Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
 
@@ -1355,7 +1360,7 @@ Address the reviewer findings. Do not expand scope.
     }
 
     Write-Host ""
-    Write-Host "=== Round $round / ${MaxRounds}: reviewer (Codex) ==="
+    Write-Host "=== Round $round / ${MaxRounds}: reviewer (Claude) ==="
 
     $testSummary = Format-TestSummary -TestGate $testGate -MaxLines $MaxGateOutputLines
     $gateSummary = Format-GateSummary -GateResults @($gateResults | Where-Object { $_.Name -ne "test" }) -MaxLines $MaxGateOutputLines
@@ -1394,8 +1399,19 @@ Original task:
 $Task
 
 You are the reviewer in a two-agent loop.
-You are running at the repository root with read-only access to the full repo for reference.
+Codex produced the implementation. You are proofreading/reviewing Codex's diff, not applying changes.
+You are running at the repository root. Treat your role as read-only: inspect files when needed, but do not edit them.
 The diff on stdin is the primary artifact under review. Inspect source files and test files in the repo when needed to verify that the diff and tests target real behavior.
+
+Code review focus:
+- Check whether the implementation actually satisfies the original task.
+- Look for correctness bugs, broken edge cases, regressions, missing error handling, and unsafe assumptions.
+- Check whether tests were added or updated when the task changes behavior that should be covered.
+- Verify that tests assert meaningful behavior instead of only exercising implementation details.
+- Watch for unrelated refactors, formatting churn, dependency changes, generated files, or scope expansion.
+- Prefer concrete, actionable findings over broad advice.
+- Do not report style preferences, naming preferences, or speculative improvements unless they affect correctness, maintainability, testability, or task scope.
+- Do not ask Codex to implement features beyond the original task. If a finding would expand scope, set scope_creep = true or use needs_clarification.
 
 Output only a JSON object that matches the provided schema.
 
@@ -1416,21 +1432,23 @@ Issue rules:
 
 Set scope_creep = true when unrelated work is present.
 Set blocking_question to a short human-facing clarification question only when verdict = "needs_clarification"; otherwise use null.
+
+Schema:
+$(Get-Content -LiteralPath $schemaPath -Raw)
 "@
 
-    [void](Invoke-ExternalText `
-        -FilePath $codexCommand `
+    $reviewOutput = (Invoke-ExternalText `
+        -FilePath $claudeCommand `
         -Arguments @(
-            "exec",
-            "--sandbox", "read-only",
-            "--ephemeral",
-            "--output-schema", $schemaPath,
-            "--output-last-message", $reviewPath,
-            $reviewPrompt
+            "-p",
+            "--input-format", "text",
+            "--output-format", "text",
+            "--no-session-persistence"
         ) `
         -WorkingDirectory $repoRoot `
-        -InputText $reviewPayload `
-        -TimeoutSeconds $ReviewerTimeoutSeconds)
+        -InputText "$reviewPrompt`n`n$reviewPayload" `
+        -TimeoutSeconds $ReviewerTimeoutSeconds).Output
+    Write-Utf8File -Path $reviewPath -Content $reviewOutput
 
     $review = Get-Content -LiteralPath $reviewPath -Raw | ConvertFrom-Json
     Write-ReviewSummary -Review $review

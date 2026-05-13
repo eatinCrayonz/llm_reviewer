@@ -2,28 +2,28 @@
 
 This repo now contains a Windows-friendly orchestration script that runs:
 
-- Claude as the implementer
-- Codex as the reviewer
+- Codex as the implementer
+- Claude as the reviewer/proofreader
 - a strict review loop with a hard round cap
 - an attested test gate before every review
-- an implementer-claim check before Codex is asked to review
+- an implementer-claim check before Claude is asked to review
 - optional lint, typecheck, mutation, and coverage gates
 - optional per-round snapshot branches without switching your working tree
 
 The key contract is simple:
 
 1. You provide an explicit task.
-2. Claude edits the repo to satisfy that task.
-3. Claude must explicitly report which files it claims to have changed.
+2. Codex edits the repo to satisfy that task.
+3. Codex must explicitly report which files it claims to have changed.
 4. The script cross-checks those claims against `git diff --name-only HEAD` in both directions.
-5. The script runs configured gates and can mechanically fail the round before Codex is called.
-6. Codex reviews the produced diff against the original task, with attested gate results attached as ground truth.
+5. The script runs configured gates and can mechanically fail the round before Claude is called.
+6. Claude reviews the produced diff against the original task, with attested gate results attached as ground truth.
 7. The loop stops on `pass` or after `MaxRounds`.
 
 ## Files
 
-- [review-loop.ps1](C:/Users/eatin/Documents/GitHub/llm_reviewer/review-loop.ps1)
-- [schemas/review-result.schema.json](C:/Users/eatin/Documents/GitHub/llm_reviewer/schemas/review-result.schema.json)
+- [review-loop.ps1](review-loop.ps1)
+- [schemas/review-result.schema.json](schemas/review-result.schema.json)
 
 ## Prerequisites
 
@@ -62,7 +62,7 @@ Additional gate example:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\review-loop.ps1 "Add input validation to the parseArgs function" -TestCommand "npm test -- --runInBand" -LintCommand "npm run lint" -TypecheckCommand "npm run typecheck" -VerifyAddedTestsRan -CoverageLcovPath "coverage/lcov.info"
 ```
 
-You can also set a default in [.review-loop.json.example](C:/Users/eatin/Documents/GitHub/llm_reviewer/.review-loop.json.example) by copying it to `.review-loop.json`:
+You can also set defaults in `.review-loop.json`:
 
 ```json
 {
@@ -81,13 +81,13 @@ You can also set a default in [.review-loop.json.example](C:/Users/eatin/Documen
 ## What It Enforces
 
 - The implementer and reviewer are separate tools.
-- Claude must emit a structured self-report with claimed changed files.
+- Codex must emit a structured self-report with claimed changed files.
 - The script rejects implementer claims that do not match `git diff --name-only HEAD`.
-- The script also rejects diff files that Claude failed to claim.
-- Codex runs the review in `read-only` sandbox mode.
-- Codex runs with `--ephemeral` so each review starts fresh.
-- Codex can inspect the repo read-only for surrounding context.
-- The review payload includes attested test results before Codex renders a verdict.
+- The script also rejects diff files that Codex failed to claim.
+- Codex runs implementation with `workspace-write` sandbox mode.
+- Codex runs with `--ephemeral` so each implementation attempt starts fresh.
+- Claude is instructed to review/proofread only and not apply edits.
+- The review payload includes attested test results before Claude renders a verdict.
 - Optional lint, typecheck, mutation, and coverage commands can mechanically fail the round before review.
 - Optional gate commands run in an isolated temporary worktree so their artifacts do not contaminate the main working tree.
 - Optional added-test verification checks that newly-added test identifiers appear in test output.
