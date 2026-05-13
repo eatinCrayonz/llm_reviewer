@@ -148,6 +148,18 @@ test_calc.py
     }
 }
 
+Describe "Remove-GitNoiseLines" {
+    It "removes git warning and hint lines from command output" {
+        $result = Remove-GitNoiseLines -Text @"
+warning: unable to access 'C:\Users\eatin/.config/git/ignore': Permission denied
+hint: waiting for your editor to close the file...
+ M review-loop.ps1
+"@
+
+        $result | Should Be " M review-loop.ps1"
+    }
+}
+
 Describe "Get-AddedTestIdentifiers" {
     It "collects js test names but ignores describe blocks" {
         $items = @(

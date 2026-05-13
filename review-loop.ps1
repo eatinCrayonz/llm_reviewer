@@ -1062,7 +1062,7 @@ if (-not $repoRoot) {
 
 Set-Location $repoRoot
 
-$workingTreeState = (Invoke-ExternalText -FilePath $gitCommand -Arguments @("status", "--porcelain") -WorkingDirectory $repoRoot).Output
+$workingTreeState = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("status", "--porcelain") -WorkingDirectory $repoRoot).Output)
 if ($workingTreeState.Trim()) {
     throw "The working tree is not clean. Commit or stash existing changes before starting the loop."
 }
