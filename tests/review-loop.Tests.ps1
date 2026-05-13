@@ -160,6 +160,20 @@ Describe "Format-GateSummary" {
     }
 }
 
+Describe "review payload attestation formatting" {
+    It "handles missing added-test identifier lists" {
+        $summary = Format-TestIdentifierAttestation -AddedTestIdentifiers $null -MissingTestIdentifiers $null -VerificationEnabled $true
+
+        $summary | Should Match "No new test identifiers were detected"
+    }
+
+    It "handles missing uncovered-line lists when coverage is not configured" {
+        $summary = Format-CoverageAttestation -CoverageReportPath $null -UncoveredLines $null
+
+        $summary | Should Match "No LCOV report was configured"
+    }
+}
+
 Describe "Write-Utf8File" {
     It "writes an empty file when given an empty string" {
         $tempFile = [System.IO.Path]::GetTempFileName()
@@ -351,7 +365,7 @@ Describe "untracked file handling" {
             "new" | Set-Content (Join-Path $tempRepo "b.txt")
 
             Ensure-UntrackedFilesVisible -RepoRoot $tempRepo -GitCommand $git
-            $patch = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "HEAD") -WorkingDirectory $tempRepo).Output
+            $patch = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD") -WorkingDirectory $tempRepo).Output
             $stateDir = Join-Path $tempRepo ".review-loop"
             New-Item -ItemType Directory -Path $stateDir | Out-Null
             $gateWorktree = New-GateWorktree -RepoRoot $tempRepo -GitCommand $git -StateDirectory $stateDir -Round 1
@@ -382,10 +396,10 @@ Describe "dirty working tree baseline handling" {
             Invoke-ExternalText -FilePath $git -Arguments @("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init") -WorkingDirectory $tempRepo | Out-Null
 
             "dirty-before-run" | Set-Content (Join-Path $tempRepo "a.txt")
-            $baselineDiff = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "HEAD") -WorkingDirectory $tempRepo).Output
+            $baselineDiff = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD") -WorkingDirectory $tempRepo).Output
 
             "changed-during-run" | Set-Content (Join-Path $tempRepo "b.txt")
-            $currentDiff = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "HEAD") -WorkingDirectory $tempRepo).Output
+            $currentDiff = (Invoke-ExternalText -FilePath $git -Arguments @("diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD") -WorkingDirectory $tempRepo).Output
             $stateDir = Join-Path $tempRepo ".review-loop"
             New-Item -ItemType Directory -Path $stateDir | Out-Null
 
@@ -398,6 +412,81 @@ Describe "dirty working tree baseline handling" {
         }
         finally {
             Remove-Item -LiteralPath $tempRepo -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe "review-loop script integration" {
+    It "runs one full passing round with stubbed Codex and Claude commands" {
+        $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
+        $tempRepo = Join-Path $tempRoot "repo"
+        $fakeBin = Join-Path $tempRoot "bin"
+        New-Item -ItemType Directory -Path $tempRepo, $fakeBin | Out-Null
+
+        $previousPath = $env:Path
+        try {
+            $git = (Get-Command git.exe).Source
+            Invoke-ExternalText -FilePath $git -Arguments @("init", "-b", "main") -WorkingDirectory $tempRepo | Out-Null
+            "base" | Set-Content -LiteralPath (Join-Path $tempRepo "app.txt") -Encoding ASCII
+            Invoke-ExternalText -FilePath $git -Arguments @("add", "app.txt") -WorkingDirectory $tempRepo | Out-Null
+            Invoke-ExternalText -FilePath $git -Arguments @("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init") -WorkingDirectory $tempRepo | Out-Null
+
+            @"
+@echo off
+set "out="
+:parse
+if "%~1"=="" goto done_parse
+if "%~1"=="--output-last-message" set "out=%~2"
+shift
+goto parse
+:done_parse
+> app.txt echo changed by fake codex
+if not "%out%"=="" (
+  > "%out%" echo SUMMARY:
+  >> "%out%" echo - changed app
+  >> "%out%" echo CLAIMED_FILES_JSON:
+  >> "%out%" echo ["app.txt"]
+)
+echo SUMMARY:
+echo - changed app
+echo CLAIMED_FILES_JSON:
+echo ["app.txt"]
+exit /b 0
+"@ | Set-Content -LiteralPath (Join-Path $fakeBin "codex.cmd") -Encoding ASCII
+
+            @"
+@echo off
+echo {"verdict":"pass","issues":[],"scope_creep":false,"blocking_question":null}
+exit /b 0
+"@ | Set-Content -LiteralPath (Join-Path $fakeBin "claude.cmd") -Encoding ASCII
+
+            $env:Path = "$fakeBin;$previousPath"
+            $powershell = (Get-Command powershell.exe).Source
+            $result = Invoke-ExternalText `
+                -FilePath $powershell `
+                -Arguments @(
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-File", $scriptPath,
+                    "Integration smoke phase",
+                    "-TestCommand", "if ((Get-Content .\app.txt -Raw) -notmatch 'changed by fake codex') { exit 1 }",
+                    "-MaxRounds", "1"
+                ) `
+                -WorkingDirectory $tempRepo `
+                -TimeoutSeconds 120 `
+                -AllowNonZeroExit
+
+            if ($result.ExitCode -ne 0) {
+                throw "review-loop.ps1 exited with $($result.ExitCode):`n$($result.Output)"
+            }
+
+            $result.ExitCode | Should Be 0
+            $result.Output | Should Match "=== PASSED in round 1 ==="
+            (Get-Content -LiteralPath (Join-Path $tempRepo "app.txt") -Raw) | Should Match "changed by fake codex"
+        }
+        finally {
+            $env:Path = $previousPath
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

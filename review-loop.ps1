@@ -548,16 +548,18 @@ function Parse-ImplementerReport {
     )
 
     $lines = @($Output -split "`r?`n")
+    $summaryHeaderPattern = '^\s*[*#>\-`"]*\s*SUMMARY\s*:?\s*[*`"]*\s*$'
+    $claimedFilesHeaderPattern = '^\s*[*#>\-`"]*\s*CLAIMED_FILES_JSON\s*:?\s*[*`"]*\s*$'
     $summaryIndex = -1
     $filesIndex = -1
 
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($summaryIndex -lt 0 -and $lines[$i] -match '^\s*[*#>\-`"]*\s*SUMMARY\s*:?\s*[*`"]*\s*$') {
+        if ($summaryIndex -lt 0 -and $lines[$i] -match $summaryHeaderPattern) {
             $summaryIndex = $i
             continue
         }
 
-        if ($filesIndex -lt 0 -and $lines[$i] -match '^\s*[*#>\-`"]*\s*CLAIMED_FILES_JSON\s*:?\s*[*`"]*\s*$') {
+        if ($filesIndex -lt 0 -and $lines[$i] -match $claimedFilesHeaderPattern) {
             $filesIndex = $i
         }
     }
@@ -809,11 +811,6 @@ Tests:
     }
 
     $status = if ($TestGate.ExitCode -eq 0) { "PASS" } else { "FAIL" }
-    $outputLines = @()
-    if ($TestGate.Output) {
-        $outputLines = $TestGate.Output -split "`r?`n"
-    }
-
     $tailText = Get-OutputTailText -Output $TestGate.Output -MaxLines $MaxLines
 
     return @"
@@ -860,13 +857,27 @@ Gate attestation:
 function Format-TestIdentifierAttestation {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [object[]]$AddedTestIdentifiers,
 
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [object[]]$MissingTestIdentifiers,
 
         [bool]$VerificationEnabled
     )
+
+    $addedIdentifiers = @()
+    if ($null -ne $AddedTestIdentifiers) {
+        $addedIdentifiers = @($AddedTestIdentifiers)
+    }
+
+    $missingIdentifiers = @()
+    if ($null -ne $MissingTestIdentifiers) {
+        $missingIdentifiers = @($MissingTestIdentifiers)
+    }
 
     if (-not $VerificationEnabled) {
         return @"
@@ -875,16 +886,16 @@ Added test execution attestation:
 "@
     }
 
-    if (@($AddedTestIdentifiers).Count -eq 0) {
+    if ($addedIdentifiers.Count -eq 0) {
         return @"
 Added test execution attestation:
 - No new test identifiers were detected in the diff.
 "@
     }
 
-    $expectedText = (@($AddedTestIdentifiers | ForEach-Object { "{0}: {1}" -f $_.file, $_.name })) -join [Environment]::NewLine
-    $missingText = if (@($MissingTestIdentifiers).Count -gt 0) {
-        (@($MissingTestIdentifiers | ForEach-Object { "{0}: {1}" -f $_.file, $_.name })) -join [Environment]::NewLine
+    $expectedText = (@($addedIdentifiers | ForEach-Object { "{0}: {1}" -f $_.file, $_.name })) -join [Environment]::NewLine
+    $missingText = if ($missingIdentifiers.Count -gt 0) {
+        (@($missingIdentifiers | ForEach-Object { "{0}: {1}" -f $_.file, $_.name })) -join [Environment]::NewLine
     }
     else {
         "(none)"
@@ -981,8 +992,15 @@ function Format-CoverageAttestation {
         [string]$CoverageReportPath,
 
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [object[]]$UncoveredLines
     )
+
+    $uncoveredLineItems = @()
+    if ($null -ne $UncoveredLines) {
+        $uncoveredLineItems = @($UncoveredLines)
+    }
 
     if (-not $CoverageReportPath) {
         return @"
@@ -991,7 +1009,7 @@ Coverage attestation:
 "@
     }
 
-    if (@($UncoveredLines).Count -eq 0) {
+    if ($uncoveredLineItems.Count -eq 0) {
         return @"
 Coverage attestation:
 - Report: $CoverageReportPath
@@ -999,7 +1017,7 @@ Coverage attestation:
 "@
     }
 
-    $grouped = $UncoveredLines | Group-Object -Property file
+    $grouped = $uncoveredLineItems | Group-Object -Property file
     $lines = @()
     foreach ($group in $grouped) {
         $lineNumbers = @($group.Group | ForEach-Object { $_.line } | Sort-Object -Unique)
@@ -1117,7 +1135,7 @@ function Ensure-UntrackedFilesVisible {
 
     [void](Invoke-ExternalText `
         -FilePath $GitCommand `
-        -Arguments @("add", "-N", "--all") `
+        -Arguments @("add", "-N", "--all", "--", ".", ":(exclude).review-loop/**") `
         -WorkingDirectory $RepoRoot `
         -AllowNonZeroExit)
 }
@@ -1270,10 +1288,14 @@ function Get-DiffFromBaseline {
             Apply-DiffToGateWorktree -WorktreePath $worktreePath -GitCommand $GitCommand -DiffText $CurrentDiffText
         }
 
+        $reviewDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", $baselineSha, "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $worktreePath).Output)
+        $fullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", $baselineSha, "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $worktreePath).Output)
+        $diffFileNamesOutput = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--name-only", $baselineSha, "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $worktreePath).Output)
+
         return [pscustomobject]@{
-            ReviewDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--no-ext-diff", $baselineSha) -WorkingDirectory $worktreePath).Output)
-            FullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--no-ext-diff", "--binary", $baselineSha) -WorkingDirectory $worktreePath).Output)
-            DiffFileNamesOutput = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--name-only", $baselineSha) -WorkingDirectory $worktreePath).Output)
+            ReviewDiffText = $reviewDiffText
+            FullDiffText = $fullDiffText
+            DiffFileNamesOutput = $diffFileNamesOutput
         }
     }
     finally {
@@ -1385,7 +1407,7 @@ $reviewPath = Join-Path $stateDirectory "review.json"
 $runId = Get-Date -Format "yyyyMMdd-HHmmss"
 
 Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
-$baselineFullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "HEAD") -WorkingDirectory $repoRoot).Output)
+$baselineFullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $repoRoot).Output)
 Write-Utf8File -Path (Join-Path $stateDirectory "baseline-diff.patch") -Content $baselineFullDiffText
 
 for ($round = 1; $round -le $MaxRounds; $round++) {
@@ -1443,7 +1465,7 @@ Address the reviewer findings. Do not expand scope.
 
     Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
 
-    $gateDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "HEAD") -WorkingDirectory $repoRoot).Output)
+    $gateDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $repoRoot).Output)
     $phaseDiff = Get-DiffFromBaseline `
         -RepoRoot $repoRoot `
         -GitCommand $gitCommand `
@@ -1513,7 +1535,7 @@ Address the reviewer findings. Do not expand scope.
 
     $reviewDiffLines = @()
     if ($reviewDiffText) {
-        $reviewDiffLines = $reviewDiffText -split "`r?`n"
+        $reviewDiffLines = @($reviewDiffText -split "`r?`n")
     }
 
     if ($reviewDiffLines.Count -gt $MaxReviewDiffLines) {
@@ -1655,7 +1677,7 @@ Address the reviewer findings. Do not expand scope.
     $testIdentifierSummary = Format-TestIdentifierAttestation -AddedTestIdentifiers $addedTestIdentifiers -MissingTestIdentifiers $missingTestIdentifiers -VerificationEnabled $verifyAddedTests
     $coverageSummary = Format-CoverageAttestation -CoverageReportPath $effectiveCoverageLcovPath -UncoveredLines $uncoveredAddedLines
     $claimedFilesJson = $implementerReport.ClaimedFiles | ConvertTo-Json -Depth 6
-    $diffFilesText = if ($diffFiles.Count -gt 0) {
+    $diffFilesText = if (@($diffFiles).Count -gt 0) {
         $diffFiles -join [Environment]::NewLine
     }
     else {
