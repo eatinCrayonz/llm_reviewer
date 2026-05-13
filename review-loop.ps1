@@ -15,8 +15,12 @@ param(
 
     [switch]$VerifyAddedTestsRan,
     [switch]$PreserveRounds,
+    [switch]$ConfirmAgentCalls,
+    [switch]$AllowApiKeyAuth,
 
     [string]$RoundBranchPrefix = "review-loop",
+    [string]$ImplementerModel,
+    [string]$ReviewerModel,
 
     [ValidateRange(30, 7200)]
     [int]$ImplementerTimeoutSeconds = 900,
@@ -253,6 +257,147 @@ function Resolve-ReviewSchemaPath {
     }
 
     return $null
+}
+
+function Assert-NoApiKeyAuth {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AgentName,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$EnvironmentVariableNames
+    )
+
+    $presentNames = @()
+    foreach ($name in $EnvironmentVariableNames) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $presentNames += $name
+        }
+    }
+
+    if (@($presentNames).Count -gt 0) {
+        throw "$AgentName would run while API-key auth appears to be configured ($($presentNames -join ', ')). This loop defaults to subscription-backed CLI auth. Remove those environment variables or pass -AllowApiKeyAuth to opt into metered API-key auth."
+    }
+}
+
+function Format-AgentModel {
+    param(
+        [AllowNull()]
+        [string]$Model
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Model)) {
+        return "(CLI default)"
+    }
+
+    return $Model.Trim()
+}
+
+function Confirm-AgentCall {
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool]$Enabled,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AgentName,
+
+        [AllowNull()]
+        [string]$Model
+    )
+
+    if (-not $Enabled) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host ("About to start {0} model call." -f $AgentName)
+    Write-Host ("Model: {0}" -f (Format-AgentModel -Model $Model))
+    $answer = Read-Host "Type YES to continue"
+    if ($answer -ne "YES") {
+        throw "$AgentName model call was not confirmed."
+    }
+}
+
+function New-CodexImplementerArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Prompt,
+
+        [AllowNull()]
+        [string]$Model
+    )
+
+    $arguments = @("exec")
+    if (-not [string]::IsNullOrWhiteSpace($Model)) {
+        $arguments += @("--model", $Model.Trim())
+    }
+
+    $arguments += @(
+        "--sandbox", "workspace-write",
+        "--ephemeral",
+        "--output-last-message", $OutputPath,
+        $Prompt
+    )
+
+    return $arguments
+}
+
+function New-ClaudeReviewerArguments {
+    param(
+        [AllowNull()]
+        [string]$Model
+    )
+
+    $arguments = @("-p")
+    if (-not [string]::IsNullOrWhiteSpace($Model)) {
+        $arguments += @("--model", $Model.Trim())
+    }
+
+    $arguments += @(
+        "--input-format", "text",
+        "--output-format", "text",
+        "--no-session-persistence"
+    )
+
+    return $arguments
+}
+
+function Write-RunSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Task,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxRounds,
+
+        [AllowNull()]
+        [string]$ImplementerModel,
+
+        [AllowNull()]
+        [string]$ReviewerModel,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$ApiKeyAuthAllowed,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$ConfirmAgentCalls
+    )
+
+    $authText = if ($ApiKeyAuthAllowed) { "API-key auth allowed" } else { "subscription-backed CLI auth required" }
+    $confirmText = if ($ConfirmAgentCalls) { "enabled" } else { "disabled" }
+
+    Write-Host ""
+    Write-Host "=== Review loop phase ==="
+    Write-Host ("Task: {0}" -f $Task)
+    Write-Host ("Max rounds: {0}" -f $MaxRounds)
+    Write-Host ("Implementer: Codex, model {0}" -f (Format-AgentModel -Model $ImplementerModel))
+    Write-Host ("Reviewer: Claude, model {0}" -f (Format-AgentModel -Model $ReviewerModel))
+    Write-Host ("Agent auth policy: {0}" -f $authText)
+    Write-Host ("Confirm agent calls: {0}" -f $confirmText)
 }
 
 function Invoke-CommandText {
@@ -1062,11 +1207,6 @@ if (-not $repoRoot) {
 
 Set-Location $repoRoot
 
-$workingTreeState = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("status", "--porcelain") -WorkingDirectory $repoRoot).Output)
-if ($workingTreeState.Trim()) {
-    throw "The working tree is not clean. Commit or stash existing changes before starting the loop."
-}
-
 $hasHead = $true
 try {
     [void](Invoke-ExternalText -FilePath $gitCommand -Arguments @("rev-parse", "--verify", "HEAD") -WorkingDirectory $repoRoot)
@@ -1087,6 +1227,8 @@ if (-not $schemaPath) {
 $config = Read-LoopConfig -RepoRoot $repoRoot
 $explicitVerifyAddedTests = if ($PSBoundParameters.ContainsKey("VerifyAddedTestsRan")) { $VerifyAddedTestsRan.IsPresent } else { $null }
 $explicitPreserveRounds = if ($PSBoundParameters.ContainsKey("PreserveRounds")) { $PreserveRounds.IsPresent } else { $null }
+$explicitConfirmAgentCalls = if ($PSBoundParameters.ContainsKey("ConfirmAgentCalls")) { $ConfirmAgentCalls.IsPresent } else { $null }
+$explicitAllowApiKeyAuth = if ($PSBoundParameters.ContainsKey("AllowApiKeyAuth")) { $AllowApiKeyAuth.IsPresent } else { $null }
 $explicitRoundBranchPrefix = if ($PSBoundParameters.ContainsKey("RoundBranchPrefix")) { $RoundBranchPrefix } else { $null }
 
 $effectiveTestCommand = Resolve-Setting -ExplicitValue $TestCommand -Config $config -ConfigName "testCommand"
@@ -1095,9 +1237,26 @@ $effectiveTypecheckCommand = Resolve-Setting -ExplicitValue $TypecheckCommand -C
 $effectiveMutationCommand = Resolve-Setting -ExplicitValue $MutationCommand -Config $config -ConfigName "mutationCommand"
 $effectiveCoverageCommand = Resolve-Setting -ExplicitValue $CoverageCommand -Config $config -ConfigName "coverageCommand"
 $effectiveCoverageLcovPath = Resolve-Setting -ExplicitValue $CoverageLcovPath -Config $config -ConfigName "coverageLcovPath"
+$effectiveImplementerModel = Resolve-Setting -ExplicitValue $ImplementerModel -Config $config -ConfigName "implementerModel"
+$effectiveReviewerModel = Resolve-Setting -ExplicitValue $ReviewerModel -Config $config -ConfigName "reviewerModel"
 $verifyAddedTests = [bool](Resolve-Setting -ExplicitValue $explicitVerifyAddedTests -Config $config -ConfigName "verifyAddedTestsRan" -DefaultValue $false)
 $preserveRoundSnapshots = [bool](Resolve-Setting -ExplicitValue $explicitPreserveRounds -Config $config -ConfigName "preserveRounds" -DefaultValue $false)
+$confirmAgentCalls = [bool](Resolve-Setting -ExplicitValue $explicitConfirmAgentCalls -Config $config -ConfigName "confirmAgentCalls" -DefaultValue $false)
+$allowApiKeyAuth = [bool](Resolve-Setting -ExplicitValue $explicitAllowApiKeyAuth -Config $config -ConfigName "allowApiKeyAuth" -DefaultValue $false)
 $effectiveRoundBranchPrefix = [string](Resolve-Setting -ExplicitValue $explicitRoundBranchPrefix -Config $config -ConfigName "roundBranchPrefix" -DefaultValue "review-loop")
+
+if (-not $allowApiKeyAuth) {
+    Assert-NoApiKeyAuth -AgentName "Codex implementer" -EnvironmentVariableNames @("OPENAI_API_KEY")
+    Assert-NoApiKeyAuth -AgentName "Claude reviewer" -EnvironmentVariableNames @("ANTHROPIC_API_KEY")
+}
+
+Write-RunSummary `
+    -Task $Task `
+    -MaxRounds $MaxRounds `
+    -ImplementerModel $effectiveImplementerModel `
+    -ReviewerModel $effectiveReviewerModel `
+    -ApiKeyAuthAllowed $allowApiKeyAuth `
+    -ConfirmAgentCalls $confirmAgentCalls
 
 $stateDirectory = Join-Path $repoRoot ".review-loop"
 New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
@@ -1142,15 +1301,10 @@ Address the reviewer findings. Do not expand scope.
     }
 
     $implementerPath = Join-Path $stateDirectory ("round-{0:00}-implementer.txt" -f $round)
+    Confirm-AgentCall -Enabled $confirmAgentCalls -AgentName "Codex implementer" -Model $effectiveImplementerModel
     $implementerResult = Invoke-ExternalText `
         -FilePath $codexCommand `
-        -Arguments @(
-            "exec",
-            "--sandbox", "workspace-write",
-            "--ephemeral",
-            "--output-last-message", $implementerPath,
-            $implementerPrompt
-        ) `
+        -Arguments (New-CodexImplementerArguments -OutputPath $implementerPath -Prompt $implementerPrompt -Model $effectiveImplementerModel) `
         -WorkingDirectory $repoRoot `
         -TimeoutSeconds $ImplementerTimeoutSeconds
 
@@ -1437,14 +1591,10 @@ Schema:
 $(Get-Content -LiteralPath $schemaPath -Raw)
 "@
 
+    Confirm-AgentCall -Enabled $confirmAgentCalls -AgentName "Claude reviewer" -Model $effectiveReviewerModel
     $reviewOutput = (Invoke-ExternalText `
         -FilePath $claudeCommand `
-        -Arguments @(
-            "-p",
-            "--input-format", "text",
-            "--output-format", "text",
-            "--no-session-persistence"
-        ) `
+        -Arguments (New-ClaudeReviewerArguments -Model $effectiveReviewerModel) `
         -WorkingDirectory $repoRoot `
         -InputText "$reviewPrompt`n`n$reviewPayload" `
         -TimeoutSeconds $ReviewerTimeoutSeconds).Output

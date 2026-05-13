@@ -5,9 +5,11 @@ This repo now contains a Windows-friendly orchestration script that runs:
 - Codex as the implementer
 - Claude as the reviewer/proofreader
 - a strict review loop with a hard round cap
+- phase-gated runs where each invocation handles only the task you provide
 - an attested test gate before every review
 - an implementer-claim check before Claude is asked to review
 - optional lint, typecheck, mutation, and coverage gates
+- subscription-backed CLI auth by default, with metered API-key auth as an explicit opt-in
 - optional per-round snapshot branches without switching your working tree
 
 The key contract is simple:
@@ -19,6 +21,7 @@ The key contract is simple:
 5. The script runs configured gates and can mechanically fail the round before Claude is called.
 6. Claude reviews the produced diff against the original task, with attested gate results attached as ground truth.
 7. The loop stops on `pass` or after `MaxRounds`.
+8. You start the next phase yourself with a new task when you are ready.
 
 ## Files
 
@@ -31,7 +34,7 @@ The key contract is simple:
 - `claude.cmd` in `PATH`
 - `codex.cmd` in `PATH`
 - Both CLIs already authenticated
-- A clean git working tree before you start
+- Subscription-backed CLI auth is the default expectation. The script refuses to run agent calls when `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` are present unless you pass `-AllowApiKeyAuth`.
 - At least one commit in the repository, so `git diff HEAD` has a baseline
 - A repo-level test command supplied either with `-TestCommand` or via `.review-loop.json`
 - If you enable changed-line coverage checks, an LCOV report path that exists after your configured commands run
@@ -62,6 +65,24 @@ Additional gate example:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\review-loop.ps1 "Add input validation to the parseArgs function" -TestCommand "npm test -- --runInBand" -LintCommand "npm run lint" -TypecheckCommand "npm run typecheck" -VerifyAddedTestsRan -CoverageLcovPath "coverage/lcov.info"
 ```
 
+Pick explicit CLI models when you do not want the nested tools to use their defaults:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\review-loop.ps1 "Add input validation to the parseArgs function" -ImplementerModel "your-codex-model" -ReviewerModel "your-claude-model"
+```
+
+Ask before each model call:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\review-loop.ps1 "Add input validation to the parseArgs function" -ConfirmAgentCalls
+```
+
+Allow metered API-key auth only when you explicitly want it:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\review-loop.ps1 "Add input validation to the parseArgs function" -AllowApiKeyAuth
+```
+
 You can also set defaults in `.review-loop.json`:
 
 ```json
@@ -72,15 +93,25 @@ You can also set defaults in `.review-loop.json`:
   "mutationCommand": "",
   "coverageCommand": "",
   "coverageLcovPath": "coverage/lcov.info",
+  "implementerModel": "",
+  "reviewerModel": "",
+  "confirmAgentCalls": false,
+  "allowApiKeyAuth": false,
   "verifyAddedTestsRan": true,
   "preserveRounds": true,
   "roundBranchPrefix": "review-loop"
 }
 ```
 
+## Phase-Gated Workflow
+
+Use one invocation for one plan phase. The script will let Codex and Claude iterate only on the task string you provide, then stop on `pass`, `needs_clarification`, or the configured round cap. It will not move on to the next phase of your plan until you run it again with that next phase as the new task.
+
 ## What It Enforces
 
 - The implementer and reviewer are separate tools.
+- Each run prints the selected agent models, auth policy, and confirmation policy before the first round starts.
+- API-key backed agent auth is blocked by default so the CLIs use their subscription-backed sign-in paths when available.
 - Codex must emit a structured self-report with claimed changed files.
 - The script rejects implementer claims that do not match `git diff --name-only HEAD`.
 - The script also rejects diff files that Codex failed to claim.
@@ -96,6 +127,7 @@ You can also set defaults in `.review-loop.json`:
 - The reviewer can escalate ambiguity with `needs_clarification`.
 - The review contract uses structured issues instead of free-form strings.
 - Each model invocation has a timeout.
+- Optional `-ConfirmAgentCalls` pauses before each model invocation.
 - Gate output passed to the reviewer is capped to the configured tail length.
 - Review diffs are capped to avoid silent context-window blowups.
 - Oversized diffs are fed back as blocker issues instead of crashing the loop.
@@ -114,10 +146,6 @@ Each run writes temporary state to `.review-loop/`:
 - optional per-round snapshot branch names
 
 That directory is ignored by git via `.gitignore`.
-
-## Important Limitation
-
-This script intentionally refuses to run if the working tree is already dirty. That keeps the reviewer focused on changes caused by the current task instead of unrelated local edits.
 
 Current limitations:
 

@@ -84,6 +84,50 @@ Describe "Resolve-ReviewSchemaPath" {
     }
 }
 
+Describe "agent command configuration" {
+    It "adds a Codex model only when one is configured" {
+        $withoutModel = New-CodexImplementerArguments -OutputPath "out.txt" -Prompt "task" -Model $null
+        $withModel = New-CodexImplementerArguments -OutputPath "out.txt" -Prompt "task" -Model " gpt-test "
+
+        ($withoutModel -contains "--model") | Should Be $false
+        $withModel | Should Be @("exec", "--model", "gpt-test", "--sandbox", "workspace-write", "--ephemeral", "--output-last-message", "out.txt", "task")
+    }
+
+    It "adds a Claude reviewer model only when one is configured" {
+        $withoutModel = New-ClaudeReviewerArguments -Model ""
+        $withModel = New-ClaudeReviewerArguments -Model " claude-test "
+
+        ($withoutModel -contains "--model") | Should Be $false
+        $withModel | Should Be @("-p", "--model", "claude-test", "--input-format", "text", "--output-format", "text", "--no-session-persistence")
+    }
+}
+
+Describe "Assert-NoApiKeyAuth" {
+    It "fails when a guarded API key environment variable is present" {
+        $previousValue = [Environment]::GetEnvironmentVariable("REVIEW_LOOP_TEST_API_KEY")
+        [Environment]::SetEnvironmentVariable("REVIEW_LOOP_TEST_API_KEY", "secret", "Process")
+
+        try {
+            { Assert-NoApiKeyAuth -AgentName "Test agent" -EnvironmentVariableNames @("REVIEW_LOOP_TEST_API_KEY") } | Should Throw "API-key auth appears to be configured"
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable("REVIEW_LOOP_TEST_API_KEY", $previousValue, "Process")
+        }
+    }
+
+    It "passes when guarded API key environment variables are absent" {
+        $previousValue = [Environment]::GetEnvironmentVariable("REVIEW_LOOP_TEST_API_KEY")
+        [Environment]::SetEnvironmentVariable("REVIEW_LOOP_TEST_API_KEY", $null, "Process")
+
+        try {
+            { Assert-NoApiKeyAuth -AgentName "Test agent" -EnvironmentVariableNames @("REVIEW_LOOP_TEST_API_KEY") } | Should Not Throw
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable("REVIEW_LOOP_TEST_API_KEY", $previousValue, "Process")
+        }
+    }
+}
+
 Describe "Write-Utf8File" {
     It "writes an empty file when given an empty string" {
         $tempFile = [System.IO.Path]::GetTempFileName()

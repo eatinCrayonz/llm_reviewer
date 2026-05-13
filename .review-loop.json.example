@@ -5,6 +5,10 @@
   "mutationCommand": "",
   "coverageCommand": "",
   "coverageLcovPath": "coverage/lcov.info",
+  "implementerModel": "",
+  "reviewerModel": "",
+  "confirmAgentCalls": false,
+  "allowApiKeyAuth": false,
   "verifyAddedTestsRan": true,
   "preserveRounds": true,
   "roundBranchPrefix": "review-loop"
