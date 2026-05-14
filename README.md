@@ -71,7 +71,7 @@ Pick explicit CLI models when you do not want the nested tools to use their defa
 powershell -NoProfile -ExecutionPolicy Bypass -File .\review-loop.ps1 "Add input validation to the parseArgs function" -ImplementerModel "your-codex-model" -ReviewerModel "your-claude-model"
 ```
 
-Ask before each model call:
+Ask once before allowing model calls for a run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\review-loop.ps1 "Add input validation to the parseArgs function" -ConfirmAgentCalls
@@ -127,7 +127,7 @@ Use one invocation for one plan phase. The script will let Codex and Claude iter
 - The reviewer can escalate ambiguity with `needs_clarification`.
 - The review contract uses structured issues instead of free-form strings.
 - Each model invocation has a timeout.
-- Optional `-ConfirmAgentCalls` pauses before each model invocation.
+- Optional `-ConfirmAgentCalls` pauses once before the run's model invocations begin.
 - Gate output passed to the reviewer is capped to the configured tail length.
 - Review diffs are capped to avoid silent context-window blowups.
 - Oversized diffs are fed back as blocker issues instead of crashing the loop.

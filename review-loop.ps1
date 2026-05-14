@@ -313,16 +313,19 @@ function Format-AgentModel {
     return $Model.Trim()
 }
 
-function Confirm-AgentCall {
+function Confirm-AgentCallsForRun {
     param(
         [Parameter(Mandatory = $true)]
         [bool]$Enabled,
 
         [Parameter(Mandatory = $true)]
-        [string]$AgentName,
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ImplementerModel,
 
         [AllowNull()]
-        [string]$Model
+        [AllowEmptyString()]
+        [string]$ReviewerModel
     )
 
     if (-not $Enabled) {
@@ -330,11 +333,12 @@ function Confirm-AgentCall {
     }
 
     Write-Host ""
-    Write-Host ("About to start {0} model call." -f $AgentName)
-    Write-Host ("Model: {0}" -f (Format-AgentModel -Model $Model))
-    $answer = Read-Host "Type YES to continue"
+    Write-Host "About to allow review-loop model calls for this run."
+    Write-Host ("Implementer model: {0}" -f (Format-AgentModel -Model $ImplementerModel))
+    Write-Host ("Reviewer model: {0}" -f (Format-AgentModel -Model $ReviewerModel))
+    $answer = Read-Host "Type YES to begin"
     if ($answer -ne "YES") {
-        throw "$AgentName model call was not confirmed."
+        throw "Review-loop model calls were not confirmed."
     }
 }
 
@@ -791,6 +795,9 @@ function Get-AddedTestIdentifiers {
             $name = $Matches[1]
         }
         elseif ($text -match '^\s*fn\s+(test_[A-Za-z0-9_]+)\s*\(') {
+            $name = $Matches[1]
+        }
+        elseif ($text -match '^\s*It\s+(?:-[A-Za-z]+\s+)?["'']([^"'']+)["'']') {
             $name = $Matches[1]
         }
         if ($name) {
@@ -1482,6 +1489,11 @@ Write-RunSummary `
     -ApiKeyAuthAllowed $allowApiKeyAuth `
     -ConfirmAgentCalls $confirmAgentCalls
 
+Confirm-AgentCallsForRun `
+    -Enabled $confirmAgentCalls `
+    -ImplementerModel $effectiveImplementerModel `
+    -ReviewerModel $effectiveReviewerModel
+
 $stateDirectory = Join-Path $repoRoot ".review-loop"
 New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
 
@@ -1529,7 +1541,6 @@ Address the reviewer findings. Do not expand scope.
     }
 
     $implementerPath = Join-Path $stateDirectory ("round-{0:00}-implementer.txt" -f $round)
-    Confirm-AgentCall -Enabled $confirmAgentCalls -AgentName "Codex implementer" -Model $effectiveImplementerModel
     $implementerResult = Invoke-ExternalText `
         -FilePath $codexCommand `
         -Arguments (New-CodexImplementerArguments -OutputPath $implementerPath -Model $effectiveImplementerModel) `
@@ -1829,7 +1840,6 @@ Schema:
 $(Get-Content -LiteralPath $schemaPath -Raw)
 "@
 
-    Confirm-AgentCall -Enabled $confirmAgentCalls -AgentName "Claude reviewer" -Model $effectiveReviewerModel
     $reviewOutput = (Invoke-ExternalText `
         -FilePath $claudeCommand `
         -Arguments (New-ClaudeReviewerArguments -Model $effectiveReviewerModel) `

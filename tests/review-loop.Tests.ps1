@@ -413,6 +413,18 @@ Describe "Get-AddedTestIdentifiers" {
         @($identifiers).Count | Should Be 0
     }
 
+    It "collects Pester It test names" {
+        $items = @(
+            [pscustomobject]@{ file = "tests/review-loop.Tests.ps1"; line = 10; text = 'Describe "parser" {' },
+            [pscustomobject]@{ file = "tests/review-loop.Tests.ps1"; line = 11; text = '    It "detects pester tests" {' },
+            [pscustomobject]@{ file = "tests/review-loop.Tests.ps1"; line = 12; text = "    It -Name 'detects named pester tests' {" }
+        )
+
+        $identifiers = Get-AddedTestIdentifiers -AddedLines $items
+
+        @($identifiers.name | Sort-Object) | Should Be @("detects named pester tests", "detects pester tests")
+    }
+
     It "returns an empty array when no added lines are present" {
         $identifiers = @(Get-AddedTestIdentifiers -AddedLines $null)
 
