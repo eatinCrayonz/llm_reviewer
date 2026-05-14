@@ -160,6 +160,33 @@ Describe "Format-GateSummary" {
     }
 }
 
+Describe "ConvertFrom-ReviewJsonOutput" {
+    It "parses raw reviewer JSON" {
+        $review = ConvertFrom-ReviewJsonOutput -Output '{"verdict":"pass","issues":[],"scope_creep":false,"blocking_question":null}'
+
+        $review.verdict | Should Be "pass"
+    }
+
+    It "extracts reviewer JSON from a fenced block" {
+        $output = @'
+Looks good.
+
+```json
+{
+  "verdict": "pass",
+  "issues": [],
+  "scope_creep": false,
+  "blocking_question": null
+}
+```
+'@
+
+        $review = ConvertFrom-ReviewJsonOutput -Output $output
+
+        $review.verdict | Should Be "pass"
+    }
+}
+
 Describe "review payload attestation formatting" {
     It "handles missing added-test identifier lists" {
         $summary = Format-TestIdentifierAttestation -AddedTestIdentifiers $null -MissingTestIdentifiers $null -VerificationEnabled $true
@@ -456,7 +483,11 @@ exit /b 0
 
             @"
 @echo off
+echo Looks good.
+echo.
+echo ```json
 echo {"verdict":"pass","issues":[],"scope_creep":false,"blocking_question":null}
+echo ```
 exit /b 0
 "@ | Set-Content -LiteralPath (Join-Path $fakeBin "claude.cmd") -Encoding ASCII
 

@@ -529,6 +529,38 @@ function Save-ReviewResult {
     Write-Utf8File -Path $Path -Content ($Review | ConvertTo-Json -Depth 6)
 }
 
+function ConvertFrom-ReviewJsonOutput {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Output
+    )
+
+    $candidates = @($Output.Trim())
+
+    foreach ($match in [regex]::Matches($Output, '(?s)```(?:json)?\s*(\{.*?\})\s*```')) {
+        $candidates += $match.Groups[1].Value.Trim()
+    }
+
+    $firstBrace = $Output.IndexOf("{")
+    $lastBrace = $Output.LastIndexOf("}")
+    if ($firstBrace -ge 0 -and $lastBrace -gt $firstBrace) {
+        $candidates += $Output.Substring($firstBrace, $lastBrace - $firstBrace + 1).Trim()
+    }
+
+    $lastError = $null
+    foreach ($candidate in @($candidates | Where-Object { $_ } | Select-Object -Unique)) {
+        try {
+            return ($candidate | ConvertFrom-Json)
+        }
+        catch {
+            $lastError = $_.Exception.Message
+        }
+    }
+
+    throw "Reviewer output did not contain a valid JSON object. $lastError"
+}
+
 function Normalize-RepoPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -1288,9 +1320,23 @@ function Get-DiffFromBaseline {
             Apply-DiffToGateWorktree -WorktreePath $worktreePath -GitCommand $GitCommand -DiffText $CurrentDiffText
         }
 
-        $reviewDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", $baselineSha, "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $worktreePath).Output)
-        $fullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", $baselineSha, "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $worktreePath).Output)
-        $diffFileNamesOutput = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $GitCommand -Arguments @("diff", "--name-only", $baselineSha, "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $worktreePath).Output)
+        $diffPathspec = @("--", ".", ":(exclude).review-loop/**")
+        $reviewDiffArguments = @("diff", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", $baselineSha) + $diffPathspec
+        $fullDiffArguments = @("diff", "--no-ext-diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", $baselineSha) + $diffPathspec
+        $diffFileNameArguments = @("diff", "--name-only", $baselineSha) + $diffPathspec
+
+        $reviewDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments $reviewDiffArguments `
+            -WorkingDirectory $worktreePath).Output)
+        $fullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments $fullDiffArguments `
+            -WorkingDirectory $worktreePath).Output)
+        $diffFileNamesOutput = Remove-GitNoiseLines -Text ((Invoke-ExternalText `
+            -FilePath $GitCommand `
+            -Arguments $diffFileNameArguments `
+            -WorkingDirectory $worktreePath).Output)
 
         return [pscustomobject]@{
             ReviewDiffText = $reviewDiffText
@@ -1756,7 +1802,7 @@ $(Get-Content -LiteralPath $schemaPath -Raw)
         -TimeoutSeconds $ReviewerTimeoutSeconds).Output
     Write-Utf8File -Path $reviewPath -Content $reviewOutput
 
-    $review = Get-Content -LiteralPath $reviewPath -Raw | ConvertFrom-Json
+    $review = ConvertFrom-ReviewJsonOutput -Output (Get-Content -LiteralPath $reviewPath -Raw)
     Write-ReviewSummary -Review $review
 
     if ($preserveRoundSnapshots) {
