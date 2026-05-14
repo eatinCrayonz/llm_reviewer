@@ -14,6 +14,118 @@ else {
     $env:REVIEW_LOOP_LIBRARY_MODE = $previousLibraryMode
 }
 
+function New-ReviewLoopIntegrationFixture {
+    param(
+        [string]$CodexReport,
+
+        [string]$ClaudeOutput,
+
+        [bool]$CodexEditsFile = $true
+    )
+
+    if ([string]::IsNullOrEmpty($CodexReport)) {
+        $CodexReport = @'
+SUMMARY:
+- changed app
+CLAIMED_FILES_JSON:
+["app.txt"]
+'@
+    }
+
+    if ([string]::IsNullOrEmpty($ClaudeOutput)) {
+        $ClaudeOutput = @'
+Looks good.
+
+```json
+{"verdict":"pass","issues":[],"scope_creep":false,"blocking_question":null}
+```
+'@
+    }
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
+    $tempRepo = Join-Path $tempRoot "repo"
+    $fakeBin = Join-Path $tempRoot "bin"
+    New-Item -ItemType Directory -Path $tempRepo, $fakeBin | Out-Null
+
+    $git = (Get-Command git.exe).Source
+    Invoke-ExternalText -FilePath $git -Arguments @("init", "-b", "main") -WorkingDirectory $tempRepo | Out-Null
+    "base" | Set-Content -LiteralPath (Join-Path $tempRepo "app.txt") -Encoding ASCII
+    Invoke-ExternalText -FilePath $git -Arguments @("add", "app.txt") -WorkingDirectory $tempRepo | Out-Null
+    Invoke-ExternalText -FilePath $git -Arguments @("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init") -WorkingDirectory $tempRepo | Out-Null
+
+    $codexReportPath = Join-Path $fakeBin "codex-report.txt"
+    Set-Content -LiteralPath $codexReportPath -Value $CodexReport -Encoding ASCII
+
+    $codexEditLine = if ($CodexEditsFile) { "> app.txt echo changed by fake codex" } else { "rem no edit" }
+    @"
+@echo off
+set "out="
+:parse
+if "%~1"=="" goto done_parse
+if "%~1"=="--output-last-message" set "out=%~2"
+shift
+goto parse
+:done_parse
+$codexEditLine
+if not "%out%"=="" copy /Y "$codexReportPath" "%out%" > nul
+type "$codexReportPath"
+exit /b 0
+"@ | Set-Content -LiteralPath (Join-Path $fakeBin "codex.cmd") -Encoding ASCII
+
+    $claudeOutputPath = Join-Path $fakeBin "claude-output.txt"
+    Set-Content -LiteralPath $claudeOutputPath -Value $ClaudeOutput -Encoding ASCII
+    @"
+@echo off
+> claude-called.txt echo called
+type "$claudeOutputPath"
+exit /b 0
+"@ | Set-Content -LiteralPath (Join-Path $fakeBin "claude.cmd") -Encoding ASCII
+
+    return [pscustomobject]@{
+        Root = $tempRoot
+        Repo = $tempRepo
+        Bin = $fakeBin
+    }
+}
+
+function Invoke-ReviewLoopIntegrationFixture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Fixture,
+
+        [string]$TestCommand = "if ((Get-Content .\app.txt -Raw) -notmatch 'changed by fake codex') { exit 1 }",
+
+        [string]$CoverageLcovPath
+    )
+
+    $previousPath = $env:Path
+    try {
+        $env:Path = "$($Fixture.Bin);$previousPath"
+        $powershell = (Get-Command powershell.exe).Source
+        $arguments = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $scriptPath,
+            "Integration smoke phase",
+            "-TestCommand", $TestCommand,
+            "-MaxRounds", "1"
+        )
+        if (-not [string]::IsNullOrWhiteSpace($CoverageLcovPath)) {
+            $arguments += @("-CoverageLcovPath", $CoverageLcovPath)
+        }
+
+        return Invoke-ExternalText `
+            -FilePath $powershell `
+            -Arguments $arguments `
+            -WorkingDirectory $Fixture.Repo `
+            -TimeoutSeconds 120 `
+            -AllowNonZeroExit
+    }
+    finally {
+        $env:Path = $previousPath
+    }
+}
+
 Describe "Parse-ImplementerReport" {
     It "parses the canonical format" {
 $report = @"
@@ -445,67 +557,9 @@ Describe "dirty working tree baseline handling" {
 
 Describe "review-loop script integration" {
     It "runs one full passing round with stubbed Codex and Claude commands" {
-        $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
-        $tempRepo = Join-Path $tempRoot "repo"
-        $fakeBin = Join-Path $tempRoot "bin"
-        New-Item -ItemType Directory -Path $tempRepo, $fakeBin | Out-Null
-
-        $previousPath = $env:Path
+        $fixture = New-ReviewLoopIntegrationFixture
         try {
-            $git = (Get-Command git.exe).Source
-            Invoke-ExternalText -FilePath $git -Arguments @("init", "-b", "main") -WorkingDirectory $tempRepo | Out-Null
-            "base" | Set-Content -LiteralPath (Join-Path $tempRepo "app.txt") -Encoding ASCII
-            Invoke-ExternalText -FilePath $git -Arguments @("add", "app.txt") -WorkingDirectory $tempRepo | Out-Null
-            Invoke-ExternalText -FilePath $git -Arguments @("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init") -WorkingDirectory $tempRepo | Out-Null
-
-            @"
-@echo off
-set "out="
-:parse
-if "%~1"=="" goto done_parse
-if "%~1"=="--output-last-message" set "out=%~2"
-shift
-goto parse
-:done_parse
-> app.txt echo changed by fake codex
-if not "%out%"=="" (
-  > "%out%" echo SUMMARY:
-  >> "%out%" echo - changed app
-  >> "%out%" echo CLAIMED_FILES_JSON:
-  >> "%out%" echo ["app.txt"]
-)
-echo SUMMARY:
-echo - changed app
-echo CLAIMED_FILES_JSON:
-echo ["app.txt"]
-exit /b 0
-"@ | Set-Content -LiteralPath (Join-Path $fakeBin "codex.cmd") -Encoding ASCII
-
-            @"
-@echo off
-echo Looks good.
-echo.
-echo ```json
-echo {"verdict":"pass","issues":[],"scope_creep":false,"blocking_question":null}
-echo ```
-exit /b 0
-"@ | Set-Content -LiteralPath (Join-Path $fakeBin "claude.cmd") -Encoding ASCII
-
-            $env:Path = "$fakeBin;$previousPath"
-            $powershell = (Get-Command powershell.exe).Source
-            $result = Invoke-ExternalText `
-                -FilePath $powershell `
-                -Arguments @(
-                    "-NoProfile",
-                    "-ExecutionPolicy", "Bypass",
-                    "-File", $scriptPath,
-                    "Integration smoke phase",
-                    "-TestCommand", "if ((Get-Content .\app.txt -Raw) -notmatch 'changed by fake codex') { exit 1 }",
-                    "-MaxRounds", "1"
-                ) `
-                -WorkingDirectory $tempRepo `
-                -TimeoutSeconds 120 `
-                -AllowNonZeroExit
+            $result = Invoke-ReviewLoopIntegrationFixture -Fixture $fixture
 
             if ($result.ExitCode -ne 0) {
                 throw "review-loop.ps1 exited with $($result.ExitCode):`n$($result.Output)"
@@ -513,11 +567,95 @@ exit /b 0
 
             $result.ExitCode | Should Be 0
             $result.Output | Should Match "=== PASSED in round 1 ==="
-            (Get-Content -LiteralPath (Join-Path $tempRepo "app.txt") -Raw) | Should Match "changed by fake codex"
+            (Get-Content -LiteralPath (Join-Path $fixture.Repo "app.txt") -Raw) | Should Match "changed by fake codex"
         }
         finally {
-            $env:Path = $previousPath
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $fixture.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "does not call Claude when the test gate fails" {
+        $fixture = New-ReviewLoopIntegrationFixture
+        try {
+            $result = Invoke-ReviewLoopIntegrationFixture -Fixture $fixture -TestCommand "exit 1"
+
+            $result.ExitCode | Should Be 1
+            $result.Output | Should Match "The test gate failed"
+            Test-Path -LiteralPath (Join-Path $fixture.Repo "claude-called.txt") | Should Be $false
+        }
+        finally {
+            Remove-Item -LiteralPath $fixture.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "uses the gate execution root when reading configured LCOV coverage" {
+        $fixture = New-ReviewLoopIntegrationFixture
+        $coverageCommand = @'
+New-Item -ItemType Directory -Force coverage | Out-Null
+Set-Content -LiteralPath coverage\lcov.info -Encoding ASCII -Value 'TN:', 'SF:app.txt', 'DA:1,1', 'DA:2,1', 'end_of_record'
+'@
+        try {
+            $result = Invoke-ReviewLoopIntegrationFixture `
+                -Fixture $fixture `
+                -TestCommand $coverageCommand `
+                -CoverageLcovPath "coverage\lcov.info"
+
+            if ($result.ExitCode -ne 0) {
+                throw "review-loop.ps1 exited with $($result.ExitCode):`n$($result.Output)"
+            }
+
+            $result.ExitCode | Should Be 0
+            $result.Output | Should Match "Reviewer verdict: pass"
+        }
+        finally {
+            Remove-Item -LiteralPath $fixture.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "exits unsuccessfully when Claude returns a failing review" {
+        $claudeOutput = @'
+```json
+{
+  "verdict": "fail",
+  "issues": [
+    {
+      "file": "app.txt",
+      "line": null,
+      "severity": "major",
+      "description": "Review finding from fake Claude.",
+      "suggestion": "Fix the fake issue."
+    }
+  ],
+  "scope_creep": false,
+  "blocking_question": null
+}
+```
+'@
+        $fixture = New-ReviewLoopIntegrationFixture -ClaudeOutput $claudeOutput
+        try {
+            $result = Invoke-ReviewLoopIntegrationFixture -Fixture $fixture
+
+            $result.ExitCode | Should Be 1
+            $result.Output | Should Match "Reviewer verdict: fail"
+            $result.Output | Should Match "Review finding from fake Claude"
+            Test-Path -LiteralPath (Join-Path $fixture.Repo "claude-called.txt") | Should Be $true
+        }
+        finally {
+            Remove-Item -LiteralPath $fixture.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "fails mechanically when Codex output is malformed" {
+        $fixture = New-ReviewLoopIntegrationFixture -CodexReport "not the expected report"
+        try {
+            $result = Invoke-ReviewLoopIntegrationFixture -Fixture $fixture
+
+            $result.ExitCode | Should Be 1
+            $result.Output | Should Match "Implementer output did not follow"
+            Test-Path -LiteralPath (Join-Path $fixture.Repo "claude-called.txt") | Should Be $false
+        }
+        finally {
+            Remove-Item -LiteralPath $fixture.Root -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

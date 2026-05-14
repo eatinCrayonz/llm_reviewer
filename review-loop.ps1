@@ -662,6 +662,15 @@ function Is-TestFile {
     return $false
 }
 
+function Test-GitNoiseLine {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Line
+    )
+
+    return $Line -match '^(warning|hint):'
+}
+
 function Remove-GitNoiseLines {
     param(
         [Parameter(Mandatory = $true)]
@@ -676,7 +685,7 @@ function Remove-GitNoiseLines {
     return @(
         $Text -split "`r?`n" |
         Where-Object {
-            $_ -notmatch '^(warning|hint):'
+            -not (Test-GitNoiseLine -Line $_)
         }
     ) -join [Environment]::NewLine
 }
@@ -694,7 +703,7 @@ function Get-DiffFiles {
 
     return @(
         $DiffFileNamesOutput -split "`r?`n" |
-        Where-Object { $_.Trim() -and $_ -notmatch '^(warning|hint):' } |
+        Where-Object { $_.Trim() -and -not (Test-GitNoiseLine -Line $_) } |
         ForEach-Object { Normalize-RepoPath -Path $_ } |
         Select-Object -Unique
     )
@@ -1172,6 +1181,33 @@ function Ensure-UntrackedFilesVisible {
         -AllowNonZeroExit)
 }
 
+function Get-CurrentReviewLoopDiff {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$GitCommand
+    )
+
+    $diffArguments = @(
+        "diff",
+        "--no-ext-diff",
+        "--binary",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "HEAD",
+        "--",
+        ".",
+        ":(exclude).review-loop/**"
+    )
+
+    return Remove-GitNoiseLines -Text ((Invoke-ExternalText `
+        -FilePath $GitCommand `
+        -Arguments $diffArguments `
+        -WorkingDirectory $RepoRoot).Output)
+}
+
 function New-GateWorktree {
     param(
         [Parameter(Mandatory = $true)]
@@ -1453,7 +1489,7 @@ $reviewPath = Join-Path $stateDirectory "review.json"
 $runId = Get-Date -Format "yyyyMMdd-HHmmss"
 
 Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
-$baselineFullDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $repoRoot).Output)
+$baselineFullDiffText = Get-CurrentReviewLoopDiff -RepoRoot $repoRoot -GitCommand $gitCommand
 Write-Utf8File -Path (Join-Path $stateDirectory "baseline-diff.patch") -Content $baselineFullDiffText
 
 for ($round = 1; $round -le $MaxRounds; $round++) {
@@ -1511,7 +1547,7 @@ Address the reviewer findings. Do not expand scope.
 
     Ensure-UntrackedFilesVisible -RepoRoot $repoRoot -GitCommand $gitCommand
 
-    $gateDiffText = Remove-GitNoiseLines -Text ((Invoke-ExternalText -FilePath $gitCommand -Arguments @("diff", "--no-ext-diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--", ".", ":(exclude).review-loop/**") -WorkingDirectory $repoRoot).Output)
+    $gateDiffText = Get-CurrentReviewLoopDiff -RepoRoot $repoRoot -GitCommand $gitCommand
     $phaseDiff = Get-DiffFromBaseline `
         -RepoRoot $repoRoot `
         -GitCommand $gitCommand `
@@ -1611,6 +1647,8 @@ Address the reviewer findings. Do not expand scope.
             Apply-DiffToGateWorktree -WorktreePath $gateWorktreePath -GitCommand $gitCommand -DiffText $gateDiffText
         }
 
+        $gateExecutionRoot = if ($gateWorktreePath) { $gateWorktreePath } else { $repoRoot }
+
         foreach ($gateDefinition in $gateDefinitions) {
             if (-not $gateDefinition.Command) {
                 continue
@@ -1619,11 +1657,10 @@ Address the reviewer findings. Do not expand scope.
             Write-Host ""
             Write-Host ("=== Round {0} / {1}: {2} gate ===" -f $round, $MaxRounds, $gateDefinition.Name)
 
-            $gateRepoRoot = if ($gateWorktreePath) { $gateWorktreePath } else { $repoRoot }
             $gateResult = Invoke-GateCommand `
                 -Name $gateDefinition.Name `
                 -CommandText $gateDefinition.Command `
-                -RepoRoot $gateRepoRoot `
+                -RepoRoot $gateExecutionRoot `
                 -TimeoutSeconds $gateDefinition.Timeout
 
             $gateResults += $gateResult
@@ -1637,8 +1674,7 @@ Address the reviewer findings. Do not expand scope.
         }
 
         if ($effectiveCoverageLcovPath) {
-            $coverageExecutionRoot = if ($gateWorktreePath) { $gateWorktreePath } else { $repoRoot }
-            $coverageReportPath = Join-Path $coverageExecutionRoot $effectiveCoverageLcovPath
+            $coverageReportPath = Join-Path $gateExecutionRoot $effectiveCoverageLcovPath
             if (-not (Test-Path -LiteralPath $coverageReportPath)) {
                 $mechanicalIssues += New-ReviewIssue `
                     -File "repo" `
@@ -1648,7 +1684,7 @@ Address the reviewer findings. Do not expand scope.
                     -Suggestion "Generate the coverage report before the reviewer step or correct the configured path."
             }
             else {
-                $coverageMap = Read-LcovCoverageMap -ReportPath $coverageReportPath -RepoRoot $coverageExecutionRoot
+                $coverageMap = Read-LcovCoverageMap -ReportPath $coverageReportPath -RepoRoot $gateExecutionRoot
                 $uncoveredAddedLines = Get-UncoveredAddedProductionLines -AddedLines $addedLines -CoverageMap $coverageMap
             }
         }
